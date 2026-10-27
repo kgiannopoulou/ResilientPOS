@@ -1,0 +1,9 @@
+build/
+out/
+cmake-build-*/
+.vs/
+.vscode/
+.idea/
+compile_commands.json
+data/*.db
+data/*.db-*
