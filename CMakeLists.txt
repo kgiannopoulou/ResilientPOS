@@ -29,6 +29,9 @@ option(RESILIENTPOS_BUILD_TESTS "Build unit tests" ON)
 # --- Core library ------------------------------------------------------------
 add_library(resilientpos_core
     src/core/Money.cpp
+    src/core/TransactionStatus.cpp
+    src/core/Transaction.cpp
+    src/util/UuidGenerator.cpp
 )
 target_include_directories(resilientpos_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(resilientpos_core PRIVATE resilientpos_warnings)
@@ -58,6 +61,9 @@ if(RESILIENTPOS_BUILD_TESTS)
 
     add_executable(resilientpos_tests
         tests/MoneyTests.cpp
+        tests/TransactionStatusTests.cpp
+        tests/UuidGeneratorTests.cpp
+        tests/TransactionTests.cpp
     )
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
