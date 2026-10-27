@@ -24,9 +24,45 @@ else()
     target_compile_options(resilientpos_warnings INTERFACE -Wall -Wextra -Wpedantic -Wconversion)
 endif()
 
+option(RESILIENTPOS_BUILD_TESTS "Build unit tests" ON)
+
+# --- Core library ------------------------------------------------------------
+add_library(resilientpos_core
+    src/core/Money.cpp
+)
+target_include_directories(resilientpos_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(resilientpos_core PRIVATE resilientpos_warnings)
+if(MSVC)
+    target_compile_options(resilientpos_core PUBLIC /utf-8)
+endif()
+
 # --- Applications ------------------------------------------------------------
 add_executable(resilient-pos apps/pos/main.cpp)
-target_link_libraries(resilient-pos PRIVATE resilientpos_warnings)
+target_link_libraries(resilient-pos PRIVATE resilientpos_core resilientpos_warnings)
 
 add_executable(resilient-server apps/server/main.cpp)
-target_link_libraries(resilient-server PRIVATE resilientpos_warnings)
+target_link_libraries(resilient-server PRIVATE resilientpos_core resilientpos_warnings)
+
+# --- Tests -------------------------------------------------------------------
+if(RESILIENTPOS_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v3.7.1
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    enable_testing()
+
+    add_executable(resilientpos_tests
+        tests/MoneyTests.cpp
+    )
+    target_link_libraries(resilientpos_tests
+        PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
+
+    list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+    include(Catch)
+    catch_discover_tests(resilientpos_tests)
+endif()
