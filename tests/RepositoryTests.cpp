@@ -1,0 +1,208 @@
+#include "resilientpos/storage/SQLiteTransactionRepository.hpp"
+#include "resilientpos/storage/StorageError.hpp"
+#include "resilientpos/util/UuidGenerator.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <chrono>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <system_error>
+
+using resilientpos::core::Money;
+using resilientpos::core::Transaction;
+using resilientpos::core::TransactionStatus;
+using resilientpos::storage::SQLiteTransactionRepository;
+using resilientpos::storage::StorageError;
+
+namespace {
+
+// A fresh database file in the temp directory, deleted (with its WAL files)
+// when the test ends.
+class TempDatabase {
+public:
+    TempDatabase()
+        : path_{std::filesystem::temp_directory_path() /
+                ("resilientpos-test-" + resilientpos::util::UuidGenerator::generate() + ".db")}
+    {
+    }
+
+    TempDatabase(const TempDatabase&) = delete;
+    TempDatabase& operator=(const TempDatabase&) = delete;
+
+    ~TempDatabase()
+    {
+        std::error_code ignored;
+        for (const char* suffix : {"", "-wal", "-shm"}) {
+            std::filesystem::remove(path_.string() + suffix, ignored);
+        }
+    }
+
+    [[nodiscard]]
+    std::string path() const { return path_.string(); }
+
+private:
+    std::filesystem::path path_;
+};
+
+// SQLite keeps millisecond precision, so compare timestamps at that resolution.
+std::chrono::milliseconds millis(std::chrono::system_clock::time_point tp)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch());
+}
+
+void requireSameTransaction(const Transaction& actual, const Transaction& expected)
+{
+    REQUIRE(actual.id == expected.id);
+    REQUIRE(actual.amount == expected.amount);
+    REQUIRE(actual.status == expected.status);
+    REQUIRE(millis(actual.createdAt) == millis(expected.createdAt));
+    REQUIRE(actual.syncAttempts == expected.syncAttempts);
+}
+
+} // namespace
+
+TEST_CASE("Repository saves a transaction", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    const auto tx = Transaction::create(Money{700});
+
+    REQUIRE_NOTHROW(repository.save(tx));
+}
+
+TEST_CASE("Repository retrieves a saved transaction", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    auto tx = Transaction::create(Money{1299});
+    tx.syncAttempts = 3;
+    repository.save(tx);
+
+    const auto found = repository.findById(tx.id);
+
+    REQUIRE(found.has_value());
+    requireSameTransaction(*found, tx);
+}
+
+TEST_CASE("Repository returns nullopt for unknown ID", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+    repository.save(Transaction::create(Money{350}));
+
+    REQUIRE_FALSE(repository.findById("does-not-exist").has_value());
+}
+
+TEST_CASE("Repository rejects a duplicate ID", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    const auto tx = Transaction::create(Money{350});
+    repository.save(tx);
+
+    REQUIRE_THROWS_AS(repository.save(tx), StorageError);
+}
+
+TEST_CASE("Repository updates status", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    const auto tx = Transaction::create(Money{350});
+    repository.save(tx);
+
+    repository.updateStatus(tx.id, TransactionStatus::PendingSync);
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::PendingSync);
+
+    repository.updateStatus(tx.id, TransactionStatus::Synced);
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Synced);
+}
+
+TEST_CASE("Repository throws when updating an unknown ID", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    REQUIRE_THROWS_AS(
+        repository.updateStatus("does-not-exist", TransactionStatus::Synced),
+        StorageError);
+}
+
+TEST_CASE("Repository retrieves pending transactions", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    const auto now = std::chrono::system_clock::now();
+
+    auto older = Transaction::create(Money{100});
+    older.createdAt = now - std::chrono::minutes{5};
+    auto newer = Transaction::create(Money{200});
+    newer.createdAt = now;
+    const auto created = Transaction::create(Money{300});
+    const auto synced = Transaction::create(Money{400});
+
+    // Save out of order to prove findPending() sorts by creation time.
+    repository.save(newer);
+    repository.save(older);
+    repository.save(created);
+    repository.save(synced);
+
+    repository.updateStatus(newer.id, TransactionStatus::PendingSync);
+    repository.updateStatus(older.id, TransactionStatus::PendingSync);
+    repository.updateStatus(synced.id, TransactionStatus::Synced);
+
+    const auto pending = repository.findPending();
+
+    REQUIRE(pending.size() == 2);
+    REQUIRE(pending[0].id == older.id);
+    REQUIRE(pending[1].id == newer.id);
+    for (const auto& tx : pending) {
+        REQUIRE(tx.status == TransactionStatus::PendingSync);
+    }
+}
+
+TEST_CASE("Repository returns no pending transactions for an empty database", "[repository]")
+{
+    TempDatabase db;
+    SQLiteTransactionRepository repository{db.path()};
+
+    REQUIRE(repository.findPending().empty());
+}
+
+TEST_CASE("Data survives closing and reopening the database", "[repository][durability]")
+{
+    TempDatabase db;
+    auto tx = Transaction::create(Money{700});
+
+    {
+        SQLiteTransactionRepository repository{db.path()};
+        repository.save(tx);
+        repository.updateStatus(tx.id, TransactionStatus::PendingSync);
+    } // repository destroyed -> database closed, as if the POS exited
+
+    SQLiteTransactionRepository reopened{db.path()};
+
+    tx.status = TransactionStatus::PendingSync;
+    const auto found = reopened.findById(tx.id);
+    REQUIRE(found.has_value());
+    requireSameTransaction(*found, tx);
+
+    const auto pending = reopened.findPending();
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending.front().id == tx.id);
+}
+
+TEST_CASE("Repository fails clearly when the database cannot be opened", "[repository]")
+{
+    const auto missingDir = std::filesystem::temp_directory_path() /
+                            ("resilientpos-missing-" + resilientpos::util::UuidGenerator::generate());
+    const auto path = (missingDir / "pos.db").string();
+
+    REQUIRE_THROWS_AS(SQLiteTransactionRepository{path}, StorageError);
+}

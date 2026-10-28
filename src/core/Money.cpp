@@ -36,6 +36,25 @@ Money operator+(Money lhs, const Money& rhs)
     return lhs;
 }
 
+Money operator*(const Money& unitPrice, std::int64_t quantity)
+{
+    constexpr auto max = std::numeric_limits<std::int64_t>::max();
+    constexpr auto min = std::numeric_limits<std::int64_t>::min();
+
+    const std::int64_t a = unitPrice.cents();
+    const std::int64_t b = quantity;
+    const bool overflows =
+        (a > 0 && b > 0 && a > max / b) ||
+        (a > 0 && b < 0 && b < min / a) ||
+        (a < 0 && b > 0 && a < min / b) ||
+        (a < 0 && b < 0 && a < max / b);
+    if (overflows) {
+        throw std::overflow_error{"Money multiplication overflow"};
+    }
+
+    return Money{a * b};
+}
+
 bool operator==(const Money& lhs, const Money& rhs)
 {
     return lhs.cents() == rhs.cents();

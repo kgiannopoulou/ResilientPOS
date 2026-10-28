@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iosfwd>
+#include <optional>
 #include <string_view>
 
 namespace resilientpos::core {
@@ -22,6 +23,11 @@ enum class TransactionStatus {
 // TransactionStatus::PendingSync -> "PENDING_SYNC"
 [[nodiscard]]
 std::string_view toString(TransactionStatus status) noexcept;
+
+// "PENDING_SYNC" -> TransactionStatus::PendingSync, unknown text -> nullopt.
+// Inverse of toString(); used when reading statuses back from storage.
+[[nodiscard]]
+std::optional<TransactionStatus> transactionStatusFromString(std::string_view text) noexcept;
 
 std::ostream& operator<<(std::ostream& os, TransactionStatus status);
 

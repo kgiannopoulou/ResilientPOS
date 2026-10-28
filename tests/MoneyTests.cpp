@@ -62,3 +62,18 @@ TEST_CASE("Money formats 0.05 euros correctly", "[money][format]")
     REQUIRE(formatMoney(Money{-5}) == "-€0.05");
     REQUIRE(formatMoney(Money{123456}) == "€1234.56");
 }
+
+TEST_CASE("Money multiplies by quantity", "[money]")
+{
+    REQUIRE(Money{350} * 2 == Money{700});
+    REQUIRE(Money{350} * 0 == Money{0});
+    REQUIRE(Money{-125} * 3 == Money{-375});
+}
+
+TEST_CASE("Money multiplication throws on overflow", "[money]")
+{
+    constexpr auto max = std::numeric_limits<std::int64_t>::max();
+
+    REQUIRE_THROWS_AS(Money{max} * 2, std::overflow_error);
+    REQUIRE_THROWS_AS(Money{max / 2 + 1} * -3, std::overflow_error);
+}

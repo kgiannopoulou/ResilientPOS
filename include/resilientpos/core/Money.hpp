@@ -25,6 +25,10 @@ private:
 [[nodiscard]]
 Money operator+(Money lhs, const Money& rhs);
 
+// Line total: unit price x quantity. Throws std::overflow_error on overflow.
+[[nodiscard]]
+Money operator*(const Money& unitPrice, std::int64_t quantity);
+
 [[nodiscard]]
 bool operator==(const Money& lhs, const Money& rhs);
 

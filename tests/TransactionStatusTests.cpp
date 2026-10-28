@@ -22,3 +22,19 @@ TEST_CASE("TransactionStatus streams as its string", "[status]")
     out << TransactionStatus::PendingSync;
     REQUIRE(out.str() == "PENDING_SYNC");
 }
+
+TEST_CASE("TransactionStatus parses back from its string", "[status]")
+{
+    using resilientpos::core::transactionStatusFromString;
+
+    for (const auto status : {TransactionStatus::Created,
+                              TransactionStatus::PendingSync,
+                              TransactionStatus::Syncing,
+                              TransactionStatus::Synced,
+                              TransactionStatus::Failed}) {
+        REQUIRE(transactionStatusFromString(toString(status)) == status);
+    }
+
+    REQUIRE_FALSE(transactionStatusFromString("pending_sync").has_value());
+    REQUIRE_FALSE(transactionStatusFromString("").has_value());
+}

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(ResilientPOS
     VERSION 0.1.0
     DESCRIPTION "Offline-first POS engine that keeps selling through network failures"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,15 +26,42 @@ endif()
 
 option(RESILIENTPOS_BUILD_TESTS "Build unit tests" ON)
 
+include(FetchContent)
+
+# --- SQLite (amalgamation, pinned and hash-checked) ----------------------------
+FetchContent_Declare(
+    sqlite3
+    URL      https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+    URL_HASH SHA256=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(sqlite3)
+
+add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+target_include_directories(sqlite3 SYSTEM PUBLIC ${sqlite3_SOURCE_DIR})
+target_compile_definitions(sqlite3 PRIVATE
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_FOREIGN_KEYS=1
+    SQLITE_OMIT_LOAD_EXTENSION
+)
+set_target_properties(sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(sqlite3 PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
 # --- Core library ------------------------------------------------------------
 add_library(resilientpos_core
     src/core/Money.cpp
     src/core/TransactionStatus.cpp
     src/core/Transaction.cpp
     src/util/UuidGenerator.cpp
+    src/storage/SQLiteTransactionRepository.cpp
 )
 target_include_directories(resilientpos_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(resilientpos_core PRIVATE resilientpos_warnings)
+target_link_libraries(resilientpos_core
+    PUBLIC sqlite3
+    PRIVATE resilientpos_warnings)
 if(MSVC)
     target_compile_options(resilientpos_core PUBLIC /utf-8)
 endif()
@@ -48,7 +75,6 @@ target_link_libraries(resilient-server PRIVATE resilientpos_core resilientpos_wa
 
 # --- Tests -------------------------------------------------------------------
 if(RESILIENTPOS_BUILD_TESTS)
-    include(FetchContent)
     FetchContent_Declare(
         Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
@@ -64,6 +90,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/TransactionStatusTests.cpp
         tests/UuidGeneratorTests.cpp
         tests/TransactionTests.cpp
+        tests/RepositoryTests.cpp
     )
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
