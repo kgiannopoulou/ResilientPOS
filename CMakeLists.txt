@@ -57,6 +57,7 @@ add_library(resilientpos_core
     src/core/Transaction.cpp
     src/util/UuidGenerator.cpp
     src/storage/SQLiteTransactionRepository.cpp
+    src/network/SendResult.cpp
 )
 target_include_directories(resilientpos_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(resilientpos_core
@@ -91,6 +92,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/UuidGeneratorTests.cpp
         tests/TransactionTests.cpp
         tests/RepositoryTests.cpp
+        tests/SendResultTests.cpp
     )
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
