@@ -1,5 +1,7 @@
 #include "resilientpos/core/Money.hpp"
 #include "resilientpos/core/Transaction.hpp"
+#include "resilientpos/network/HttpServerClient.hpp"
+#include "resilientpos/service/TransactionService.hpp"
 #include "resilientpos/storage/SQLiteTransactionRepository.hpp"
 #include "resilientpos/storage/TransactionRepository.hpp"
 
@@ -17,14 +19,18 @@
 #include <system_error>
 
 using resilientpos::core::Money;
-using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
+using resilientpos::network::HttpServerClient;
+using resilientpos::network::SendResultType;
+using resilientpos::service::TransactionService;
 using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::TransactionRepository;
 
 namespace {
 
-constexpr std::string_view kDefaultDatabase = "data/resilientpos.db";
+constexpr std::string_view kDefaultDatabase = "data/pos.db";
+constexpr std::string_view kDefaultServerHost = "127.0.0.1";
+constexpr std::uint16_t kDefaultServerPort = 8080;
 
 std::string_view trim(std::string_view text)
 {
@@ -67,7 +73,7 @@ std::optional<std::int64_t> readInteger(std::string_view prompt, std::int64_t mi
     }
 }
 
-void newTransaction(TransactionRepository& repository)
+void newTransaction(TransactionService& service)
 {
     auto product = readLine("Product: ");
     if (!product) {
@@ -89,19 +95,51 @@ void newTransaction(TransactionRepository& repository)
     const Money total = Money{*priceCents} * *quantity;
     std::cout << '\n'
               << *quantity << " x " << *product << " @ " << Money{*priceCents} << '\n'
-              << "Total: " << total << "\n\n";
+              << "Total: " << total << "\n\n"
+              << "Processing transaction...\n\n";
 
-    auto transaction = Transaction::create(total);
+    // Saved to SQLite first, then sent. Only a storage failure can throw here.
+    const auto transaction = service.createTransaction(total);
+    const auto& result = service.lastSendResult();
 
-    // Persist first, then mark it ready for sync. If the till dies between the
-    // two calls the sale is still on disk (as CREATED) rather than lost.
-    repository.save(transaction);
-    repository.updateStatus(transaction.id, TransactionStatus::PendingSync);
-    transaction.status = TransactionStatus::PendingSync;
+    switch (result.type) {
+    case SendResultType::Accepted:
+        std::cout << "[NETWORK] Connected\n"
+                  << "[SERVER] Transaction accepted\n";
+        break;
+    case SendResultType::AlreadyProcessed:
+        std::cout << "[NETWORK] Connected\n"
+                  << "[SERVER] Transaction already processed\n";
+        break;
+    case SendResultType::ServerError:
+        std::cout << "[NETWORK] Connected\n"
+                  << "[SERVER] Error: " << result.message << "\n\n"
+                  << "Transaction saved locally.\n";
+        break;
+    case SendResultType::NetworkError:
+        std::cout << "[NETWORK] Server unavailable (" << result.message << ")\n\n"
+                  << "Transaction saved locally.\n";
+        break;
+    }
 
-    std::cout << "Transaction created:\n"
-              << transaction.id << "\n\n"
+    std::cout << "\nTransaction: " << transaction.id << '\n'
               << "Status: " << transaction.status << '\n';
+    if (transaction.status == TransactionStatus::PendingSync) {
+        std::cout << "\nPOS CAN CONTINUE OPERATING\n";
+    }
+}
+
+// Pads to `width` display columns. Counts UTF-8 code points, not bytes,
+// so "€5.50" lines up with plain ASCII.
+std::string padRight(const std::string& text, std::size_t width)
+{
+    std::size_t columns = 0;
+    for (const char c : text) {
+        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
+            ++columns;
+        }
+    }
+    return columns >= width ? text + ' ' : text + std::string(width - columns, ' ');
 }
 
 std::string formatUtc(std::chrono::system_clock::time_point tp)
@@ -117,33 +155,54 @@ void listPending(TransactionRepository& repository)
         return;
     }
 
-    std::cout << pending.size() << " transaction(s) waiting to sync:\n\n";
+    std::cout << padRight("ID", 12) << padRight("AMOUNT", 13) << padRight("STATUS", 15)
+              << "CREATED\n"
+              << std::string(62, '-') << '\n';
     Money total{0};
     for (const auto& tx : pending) {
-        std::cout << "  " << tx.id
-                  << "  " << formatUtc(tx.createdAt)
-                  << "  " << tx.amount
-                  << "  " << tx.status << '\n';
+        std::cout << padRight(tx.id.substr(0, 8), 12)
+                  << padRight(resilientpos::core::formatMoney(tx.amount), 13)
+                  << padRight(std::string{resilientpos::core::toString(tx.status)}, 15)
+                  << formatUtc(tx.createdAt) << '\n';
         total += tx.amount;
     }
-    std::cout << "\nPending total: " << total << '\n';
+    std::cout << "\nPending synchronization: " << pending.size() << '\n'
+              << "Pending total: " << total << '\n';
+}
+
+std::uint16_t parsePort(std::string_view text)
+{
+    std::uint16_t port{};
+    const auto* end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(text.data(), end, port);
+    if (ec != std::errc{} || ptr != end) {
+        throw std::invalid_argument{"Invalid server port: " + std::string{text}};
+    }
+    return port;
 }
 
 } // namespace
 
+// Usage: resilient-pos [database] [server-host] [server-port]
 int main(int argc, char* argv[])
 {
-    const std::filesystem::path databasePath =
-        argc > 1 ? std::filesystem::path{argv[1]} : std::filesystem::path{kDefaultDatabase};
-
     std::cout << "=========== ResilientPOS ===========\n";
 
     try {
+        const std::filesystem::path databasePath =
+            argc > 1 ? std::filesystem::path{argv[1]} : std::filesystem::path{kDefaultDatabase};
+        const std::string serverHost = argc > 2 ? argv[2] : std::string{kDefaultServerHost};
+        const std::uint16_t serverPort = argc > 3 ? parsePort(argv[3]) : kDefaultServerPort;
+
         if (databasePath.has_parent_path()) {
             std::filesystem::create_directories(databasePath.parent_path());
         }
         SQLiteTransactionRepository repository{databasePath.string()};
-        std::cout << "Database: " << databasePath.string() << '\n';
+        HttpServerClient serverClient{serverHost, serverPort};
+        TransactionService service{repository, serverClient};
+
+        std::cout << "Database: " << databasePath.string() << '\n'
+                  << "Server:   http://" << serverHost << ':' << serverPort << '\n';
 
         while (true) {
             std::cout << "\n"
@@ -159,7 +218,7 @@ int main(int argc, char* argv[])
 
             try {
                 if (*choice == "1") {
-                    newTransaction(repository);
+                    newTransaction(service);
                 } else if (*choice == "2") {
                     listPending(repository);
                 } else {

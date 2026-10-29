@@ -1,50 +1,21 @@
 #include "resilientpos/storage/SQLiteTransactionRepository.hpp"
 #include "resilientpos/storage/StorageError.hpp"
-#include "resilientpos/util/UuidGenerator.hpp"
+#include "TempDatabase.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
-#include <filesystem>
 #include <optional>
 #include <string>
-#include <system_error>
 
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
 using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::StorageError;
+using resilientpos::test::TempDatabase;
 
 namespace {
-
-// A fresh database file in the temp directory, deleted (with its WAL files)
-// when the test ends.
-class TempDatabase {
-public:
-    TempDatabase()
-        : path_{std::filesystem::temp_directory_path() /
-                ("resilientpos-test-" + resilientpos::util::UuidGenerator::generate() + ".db")}
-    {
-    }
-
-    TempDatabase(const TempDatabase&) = delete;
-    TempDatabase& operator=(const TempDatabase&) = delete;
-
-    ~TempDatabase()
-    {
-        std::error_code ignored;
-        for (const char* suffix : {"", "-wal", "-shm"}) {
-            std::filesystem::remove(path_.string() + suffix, ignored);
-        }
-    }
-
-    [[nodiscard]]
-    std::string path() const { return path_.string(); }
-
-private:
-    std::filesystem::path path_;
-};
 
 // SQLite keeps millisecond precision, so compare timestamps at that resolution.
 std::chrono::milliseconds millis(std::chrono::system_clock::time_point tp)

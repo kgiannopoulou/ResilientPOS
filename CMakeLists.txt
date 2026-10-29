@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25)
 
 project(ResilientPOS
     VERSION 0.1.0
@@ -50,6 +50,21 @@ if(NOT WIN32)
     target_link_libraries(sqlite3 PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
+# --- Boost (Asio + Beast for HTTP, JSON for the wire format) -----------------
+# Official CMake-enabled release tarball, pinned and hash-checked. Only the
+# libraries listed below (and their dependencies) are configured and built.
+set(BOOST_INCLUDE_LIBRARIES asio beast json)
+set(BOOST_ENABLE_CMAKE ON)
+FetchContent_Declare(
+    Boost
+    URL      https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
+    URL_HASH SHA256=2c5ec5edcdff47ff55e27ed9560b0a0b94b07bd07ed9928b476150e16b0efc57
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
+    SYSTEM
+)
+FetchContent_MakeAvailable(Boost)
+
 # --- Core library ------------------------------------------------------------
 add_library(resilientpos_core
     src/core/Money.cpp
@@ -58,13 +73,25 @@ add_library(resilientpos_core
     src/util/UuidGenerator.cpp
     src/storage/SQLiteTransactionRepository.cpp
     src/network/SendResult.cpp
+    src/network/HttpServerClient.cpp
+    src/service/TransactionService.cpp
+    src/server/ProcessedTransactionStore.cpp
+    src/server/TransactionHandler.cpp
+    src/server/HttpTransactionServer.cpp
 )
-target_include_directories(resilientpos_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(resilientpos_core
+    PUBLIC  ${PROJECT_SOURCE_DIR}/include
+    PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# Boost stays an implementation detail: no public header includes it.
 target_link_libraries(resilientpos_core
-    PUBLIC sqlite3
-    PRIVATE resilientpos_warnings)
+    PUBLIC  sqlite3
+    PRIVATE Boost::asio Boost::beast Boost::json resilientpos_warnings)
 if(MSVC)
     target_compile_options(resilientpos_core PUBLIC /utf-8)
+endif()
+if(WIN32)
+    # Target Windows 10+ (silences Asio's "_WIN32_WINNT not defined" warning).
+    target_compile_definitions(resilientpos_core PRIVATE _WIN32_WINNT=0x0A00)
 endif()
 
 # --- Applications ------------------------------------------------------------
@@ -93,6 +120,10 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/TransactionTests.cpp
         tests/RepositoryTests.cpp
         tests/SendResultTests.cpp
+        tests/ProcessedTransactionStoreTests.cpp
+        tests/TransactionHandlerTests.cpp
+        tests/TransactionServiceTests.cpp
+        tests/HttpIntegrationTests.cpp
     )
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
