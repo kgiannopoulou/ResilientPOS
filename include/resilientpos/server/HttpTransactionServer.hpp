@@ -1,5 +1,6 @@
 #pragma once
 
+#include "resilientpos/server/NetworkSimulationMode.hpp"
 #include "resilientpos/server/ProcessedTransactionStore.hpp"
 
 #include <cstdint>
@@ -37,6 +38,13 @@ public:
     // The port actually bound.
     [[nodiscard]]
     std::uint16_t port() const noexcept;
+
+    // Failure injection (see NetworkSimulationMode). Thread-safe; applies to
+    // requests that arrive after the call. Starts as Normal.
+    void setSimulationMode(NetworkSimulationMode mode) noexcept;
+
+    [[nodiscard]]
+    NetworkSimulationMode simulationMode() const noexcept;
 
     // Serves requests until stop() is called (or SIGINT/SIGTERM if
     // handleSignals was requested). Blocks the calling thread.

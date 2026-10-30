@@ -4,6 +4,7 @@
 #include "resilientpos/service/TransactionService.hpp"
 #include "resilientpos/storage/SQLiteTransactionRepository.hpp"
 #include "resilientpos/storage/TransactionRepository.hpp"
+#include "resilientpos/sync/SyncEngine.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -25,6 +26,7 @@ using resilientpos::network::SendResultType;
 using resilientpos::service::TransactionService;
 using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::TransactionRepository;
+using resilientpos::sync::SyncEngine;
 
 namespace {
 
@@ -200,6 +202,9 @@ int main(int argc, char* argv[])
         SQLiteTransactionRepository repository{databasePath.string()};
         HttpServerClient serverClient{serverHost, serverPort};
         TransactionService service{repository, serverClient};
+        SyncEngine syncEngine{repository, serverClient, [](std::string_view line) {
+            std::cout << line << '\n';
+        }};
 
         std::cout << "Database: " << databasePath.string() << '\n'
                   << "Server:   http://" << serverHost << ':' << serverPort << '\n';
@@ -208,10 +213,11 @@ int main(int argc, char* argv[])
             std::cout << "\n"
                          "1. New transaction\n"
                          "2. List pending\n"
-                         "3. Exit\n\n";
+                         "3. Sync now\n"
+                         "4. Exit\n\n";
 
             const auto choice = readLine("Choice: ");
-            if (!choice || *choice == "3") {
+            if (!choice || *choice == "4") {
                 break;
             }
             std::cout << '\n';
@@ -221,6 +227,8 @@ int main(int argc, char* argv[])
                     newTransaction(service);
                 } else if (*choice == "2") {
                     listPending(repository);
+                } else if (*choice == "3") {
+                    syncEngine.syncPendingTransactions();
                 } else {
                     std::cout << "Unknown option '" << *choice << "'.\n";
                 }

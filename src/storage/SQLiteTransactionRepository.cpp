@@ -95,8 +95,11 @@ SQLiteTransactionRepository::findById(const std::string& id)
 std::vector<core::Transaction> SQLiteTransactionRepository::findPending()
 {
     Statement stmt{db_.get(),
-        std::string{kSelectColumns} + "WHERE status = ?1 ORDER BY created_at, rowid"};
+        std::string{kSelectColumns} + "WHERE status IN (?1, ?2) ORDER BY created_at, rowid"};
     stmt.bind(1, core::toString(core::TransactionStatus::PendingSync));
+    // SYNCING only survives in the database if the till stopped mid-sync;
+    // whether the server got it is unknown, so it must be sent again.
+    stmt.bind(2, core::toString(core::TransactionStatus::Syncing));
 
     std::vector<core::Transaction> pending;
     while (stmt.step()) {

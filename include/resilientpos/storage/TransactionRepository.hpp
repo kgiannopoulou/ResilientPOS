@@ -25,8 +25,9 @@ public:
     virtual std::optional<core::Transaction>
     findById(const std::string& id) = 0;
 
-    // Transactions waiting to be sent to the server (PENDING_SYNC),
-    // oldest first so they sync in the order they were rung up.
+    // Transactions waiting to be sent to the server, oldest first so they sync
+    // in the order they were rung up: PENDING_SYNC, plus any left SYNCING by a
+    // sync that was interrupted (crash/power loss) before it got an answer.
     [[nodiscard]]
     virtual std::vector<core::Transaction>
     findPending() = 0;

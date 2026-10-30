@@ -6,6 +6,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <utility>
@@ -23,13 +24,18 @@ constexpr auto kSessionTimeout = std::chrono::seconds{10};
 constexpr std::size_t kMaxBodyBytes = 16 * 1024;
 
 // One accepted connection: read a request, write the response, close.
+// The simulation mode in force when the request arrives decides how
+// (or whether) it is answered.
 class Session : public std::enable_shared_from_this<Session> {
 public:
     Session(tcp::socket socket, ProcessedTransactionStore& store,
-            const HttpTransactionServer::Logger& logger)
+            const HttpTransactionServer::Logger& logger,
+            const std::atomic<NetworkSimulationMode>& mode)
         : stream_{std::move(socket)}
+        , timer_{stream_.get_executor()}
         , store_{store}
         , logger_{logger}
+        , mode_{mode}
     {
         parser_.body_limit(kMaxBodyBytes);
     }
@@ -59,20 +65,68 @@ private:
         response_.set(http::field::content_type, "application/json");
 
         if (request.target() != "/transactions") {
-            response_.result(http::status::not_found);
-            response_.body() = R"({"status":"REJECTED","error":"unknown path"})";
-        } else if (request.method() != http::verb::post) {
-            response_.result(http::status::method_not_allowed);
-            response_.set(http::field::allow, "POST");
-            response_.body() = R"({"status":"REJECTED","error":"use POST"})";
-        } else {
-            const auto result = handleTransactionRequest(request.body(), store_);
-            response_.result(result.httpStatus);
-            response_.body() = result.body;
-            if (logger_) {
-                logger_(std::string{request.body()} + " -> " + result.body);
-            }
+            reply(http::status::not_found, R"({"status":"REJECTED","error":"unknown path"})");
+            return;
         }
+        if (request.method() != http::verb::post) {
+            response_.set(http::field::allow, "POST");
+            reply(http::status::method_not_allowed, R"({"status":"REJECTED","error":"use POST"})");
+            return;
+        }
+
+        switch (mode_.load()) {
+        case NetworkSimulationMode::Normal:
+            process();
+            break;
+
+        case NetworkSimulationMode::Latency:
+            timer_.expires_after(kSimulatedLatency);
+            timer_.async_wait([self = shared_from_this()](beast::error_code e) {
+                if (!e) {
+                    self->process();
+                }
+            });
+            break;
+
+        case NetworkSimulationMode::Reject:
+            log(request.body() + " -> 503 (simulated: rejected, not stored)");
+            reply(http::status::service_unavailable,
+                  R"({"status":"ERROR","error":"simulated outage"})");
+            break;
+
+        case NetworkSimulationMode::Timeout:
+            // Not stored, never answered. The timer keeps the session (and so
+            // the open connection) alive until the client gives up first.
+            log(request.body() + " -> no answer (simulated: timeout, not stored)");
+            timer_.expires_after(kSessionTimeout);
+            timer_.async_wait([self = shared_from_this()](beast::error_code) {
+                self->close();
+            });
+            break;
+
+        case NetworkSimulationMode::DropResponseAfterProcessing: {
+            // Store and commit exactly as normal, then hang up instead of
+            // answering: the POS can't tell this from the request being lost.
+            const auto result = handleTransactionRequest(request.body(), store_);
+            log(request.body() + " -> " + result.body + " COMMITTED, response DROPPED (simulated)");
+            close();
+            break;
+        }
+        }
+    }
+
+    void process()
+    {
+        const auto& request = parser_.get();
+        const auto result = handleTransactionRequest(request.body(), store_);
+        log(request.body() + " -> " + result.body);
+        reply(static_cast<http::status>(result.httpStatus), result.body);
+    }
+
+    void reply(http::status status, std::string body)
+    {
+        response_.result(status);
+        response_.body() = std::move(body);
         response_.prepare_payload();
 
         http::async_write(stream_, response_,
@@ -82,12 +136,28 @@ private:
             });
     }
 
+    void close()
+    {
+        beast::error_code ignored;
+        stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
+        stream_.socket().close(ignored);
+    }
+
+    void log(const std::string& line) const
+    {
+        if (logger_) {
+            logger_(line);
+        }
+    }
+
     beast::tcp_stream stream_;
+    asio::steady_timer timer_;
     beast::flat_buffer buffer_;
     http::request_parser<http::string_body> parser_;
     http::response<http::string_body> response_;
     ProcessedTransactionStore& store_;
     const HttpTransactionServer::Logger& logger_;
+    const std::atomic<NetworkSimulationMode>& mode_;
 };
 
 } // namespace
@@ -106,13 +176,14 @@ struct HttpTransactionServer::Impl {
             if (ec) {
                 return;  // acceptor closed by stop()
             }
-            std::make_shared<Session>(std::move(socket), store, logger)->start();
+            std::make_shared<Session>(std::move(socket), store, logger, mode)->start();
             accept();
         });
     }
 
     ProcessedTransactionStore& store;
     Logger logger;
+    std::atomic<NetworkSimulationMode> mode{NetworkSimulationMode::Normal};
     asio::io_context ioc;
     tcp::acceptor acceptor;
 };
@@ -131,6 +202,16 @@ HttpTransactionServer::~HttpTransactionServer() = default;
 std::uint16_t HttpTransactionServer::port() const noexcept
 {
     return impl_->acceptor.local_endpoint().port();
+}
+
+void HttpTransactionServer::setSimulationMode(NetworkSimulationMode mode) noexcept
+{
+    impl_->mode.store(mode);
+}
+
+NetworkSimulationMode HttpTransactionServer::simulationMode() const noexcept
+{
+    return impl_->mode.load();
 }
 
 void HttpTransactionServer::run(bool handleSignals)

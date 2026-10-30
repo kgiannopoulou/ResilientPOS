@@ -75,7 +75,10 @@ add_library(resilientpos_core
     src/network/SendResult.cpp
     src/network/HttpServerClient.cpp
     src/service/TransactionService.cpp
+    src/sync/RetryPolicy.cpp
+    src/sync/SyncEngine.cpp
     src/server/ProcessedTransactionStore.cpp
+    src/server/NetworkSimulationMode.cpp
     src/server/TransactionHandler.cpp
     src/server/HttpTransactionServer.cpp
 )
@@ -124,6 +127,9 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/TransactionHandlerTests.cpp
         tests/TransactionServiceTests.cpp
         tests/HttpIntegrationTests.cpp
+        tests/RetryPolicyTests.cpp
+        tests/SyncEngineTests.cpp
+        tests/FailureSimulationTests.cpp
     )
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)

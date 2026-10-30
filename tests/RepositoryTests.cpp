@@ -138,6 +138,24 @@ TEST_CASE("Repository retrieves pending transactions", "[repository]")
     }
 }
 
+TEST_CASE("Repository returns a transaction left SYNCING by an interrupted sync", "[repository][durability]")
+{
+    TempDatabase db;
+    const auto tx = Transaction::create(Money{700});
+
+    {
+        SQLiteTransactionRepository repository{db.path()};
+        repository.save(tx);
+        repository.updateStatus(tx.id, TransactionStatus::Syncing);
+    } // till dies before the server's answer arrives
+
+    SQLiteTransactionRepository reopened{db.path()};
+    const auto pending = reopened.findPending();
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending.front().id == tx.id);
+    REQUIRE(pending.front().status == TransactionStatus::Syncing);
+}
+
 TEST_CASE("Repository returns no pending transactions for an empty database", "[repository]")
 {
     TempDatabase db;
