@@ -77,7 +77,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Boost)
 
-# --- spdlog (structured diagnostics; bundled fmt) -------------------------------
+# --- spdlog (structured diagnostics) -------------------------------------------
+# Formats with C++20 std::format instead of its bundled fmt, whose consteval
+# format strings do not compile with Clang 18 in C++20 mode.
+set(SPDLOG_USE_STD_FORMAT ON)
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
