@@ -42,13 +42,13 @@ beast::error_code runOperation(asio::io_context& ioc, Start&& start)
     return result;
 }
 
+// `response` is a const reference to a fully read reply; clang-analyzer
+// follows Beast's internal moves into it and misreports it as moved-from.
+// NOLINTBEGIN(clang-analyzer-cplusplus.Move)
 SendResult interpretResponse(const http::response<http::string_body>& response)
 {
     const auto statusCode = response.result_int();
     if (statusCode < 200 || statusCode >= 300) {
-        // `response` is a const reference; the analyzer follows Beast's
-        // internal moves into it and misreports it as moved-from.
-        // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move)
         return serverError("HTTP " + std::to_string(statusCode) + ": " + response.body());
     }
 
@@ -69,6 +69,7 @@ SendResult interpretResponse(const http::response<http::string_body>& response)
     }
     return serverError("Server answered " + std::string{text});
 }
+// NOLINTEND(clang-analyzer-cplusplus.Move)
 
 } // namespace
 

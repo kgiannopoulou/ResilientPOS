@@ -13,3 +13,7 @@ Checks: >
   misc-redundant-expression,
   misc-unused-using-decls
 HeaderFilterRegex: 'resilientpos/'
+CheckOptions:
+  # `(void)socket.close(ec)` marks a deliberately ignored error code.
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: true
