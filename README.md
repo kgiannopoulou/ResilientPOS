@@ -351,7 +351,7 @@ Server: one io_context thread (no locks needed in the store)
 | Build | CMake ≥ 3.25, dependencies via `FetchContent` (pinned; SQLite and Boost hash-checked) |
 | Storage | SQLite 3.46.1 amalgamation, WAL + `synchronous=FULL`, RAII handles/statements |
 | Network | Boost 1.86 — Asio + Beast (HTTP/1.1), Boost.JSON |
-| Logging | spdlog 1.14 |
+| Logging | spdlog 1.15 |
 | Tests | Catch2 v3 |
 | CI | GitHub Actions: Ubuntu + Windows builds, ASan/UBSan, TSan, clang-tidy |
 
