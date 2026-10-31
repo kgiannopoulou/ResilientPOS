@@ -46,8 +46,9 @@ void print(std::string_view text)
 std::uint16_t parsePort(std::string_view text)
 {
     std::uint16_t port{};
-    const auto* end = text.data() + text.size();
-    const auto [ptr, ec] = std::from_chars(text.data(), end, port);
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, port);
     if (ec != std::errc{} || ptr != end) {
         throw std::invalid_argument{"Invalid port: " + std::string{text}};
     }

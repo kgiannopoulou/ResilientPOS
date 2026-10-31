@@ -46,6 +46,9 @@ SendResult interpretResponse(const http::response<http::string_body>& response)
 {
     const auto statusCode = response.result_int();
     if (statusCode < 200 || statusCode >= 300) {
+        // `response` is a const reference; the analyzer follows Beast's
+        // internal moves into it and misreports it as moved-from.
+        // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move)
         return serverError("HTTP " + std::to_string(statusCode) + ": " + response.body());
     }
 
@@ -132,7 +135,7 @@ SendResult HttpServerClient::send(const core::Transaction& transaction)
         }
 
         beast::error_code ignored;
-        stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
+        (void)stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
 
         return interpretResponse(response);
     } catch (const std::exception& e) {

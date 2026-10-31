@@ -104,8 +104,9 @@ void SyncEngine::start()
     if (worker_.joinable()) {
         return;
     }
-    status_ = WorkerStatus{.running = true};
-    worker_ = std::jthread{[this](std::stop_token stopToken) { run(stopToken); }};
+    status_ = WorkerStatus{};
+    status_.running = true;
+    worker_ = std::jthread{[this](const std::stop_token& stopToken) { run(stopToken); }};
 }
 
 void SyncEngine::stop()
@@ -146,7 +147,7 @@ WorkerStatus SyncEngine::workerStatus() const
     return status_;
 }
 
-void SyncEngine::run(std::stop_token stopToken)
+void SyncEngine::run(const std::stop_token& stopToken)
 {
     spdlog::info("Sync worker started");
 

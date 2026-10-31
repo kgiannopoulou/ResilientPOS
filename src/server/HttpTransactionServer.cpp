@@ -23,7 +23,7 @@ namespace resilientpos::server {
 namespace {
 
 constexpr auto kSessionTimeout = std::chrono::seconds{10};
-constexpr std::size_t kMaxBodyBytes = 16 * 1024;
+constexpr std::size_t kMaxBodyBytes = std::size_t{16} * 1024;
 
 // The configured mode, and the dice for RandomFailure. Only the io_context
 // thread rolls the dice; the mode itself may be changed from any thread.
@@ -158,15 +158,15 @@ private:
         http::async_write(stream_, response_,
             [self = shared_from_this()](beast::error_code, std::size_t) {
                 beast::error_code ignored;
-                self->stream_.socket().shutdown(tcp::socket::shutdown_send, ignored);
+                (void)self->stream_.socket().shutdown(tcp::socket::shutdown_send, ignored);
             });
     }
 
     void close()
     {
         beast::error_code ignored;
-        stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
-        stream_.socket().close(ignored);
+        (void)stream_.socket().shutdown(tcp::socket::shutdown_both, ignored);
+        (void)stream_.socket().close(ignored);
     }
 
     beast::tcp_stream stream_;
@@ -251,7 +251,7 @@ void HttpTransactionServer::stop()
 {
     asio::post(impl_->ioc, [this] {
         beast::error_code ignored;
-        impl_->acceptor.close(ignored);
+        (void)impl_->acceptor.close(ignored);
         impl_->ioc.stop();
     });
 }

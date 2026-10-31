@@ -128,7 +128,7 @@ public:
     WorkerStatus workerStatus() const;
 
 private:
-    void run(std::stop_token stopToken);
+    void run(const std::stop_token& stopToken);
 
     storage::TransactionRepository& repository_;
     network::ServerClient& serverClient_;
