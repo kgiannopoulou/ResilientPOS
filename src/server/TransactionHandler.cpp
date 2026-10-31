@@ -1,6 +1,7 @@
 #include "resilientpos/server/TransactionHandler.hpp"
 
 #include <boost/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include <cstdint>
 #include <exception>
@@ -13,6 +14,9 @@ namespace {
 
 HandlerResponse reply(unsigned int httpStatus, std::string_view status, std::string_view error = {})
 {
+    if (!error.empty()) {
+        spdlog::warn("Request {} status={} error=\"{}\"", httpStatus, status, error);
+    }
     json::object body{{"status", status}};
     if (!error.empty()) {
         body["error"] = error;
@@ -47,8 +51,15 @@ HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransac
     }
 
     try {
-        const auto outcome = store.record(std::string{id->get_string()}, amount->get_int64());
-        return reply(200, outcome == RecordOutcome::Inserted ? "ACCEPTED" : "ALREADY_PROCESSED");
+        const std::string transactionId{id->get_string()};
+        const auto outcome = store.record(transactionId, amount->get_int64());
+        const auto shortId = transactionId.substr(0, 8);
+        if (outcome == RecordOutcome::Inserted) {
+            spdlog::info("Transaction accepted id={} amount={}", shortId, amount->get_int64());
+            return reply(200, "ACCEPTED");
+        }
+        spdlog::info("Duplicate transaction id={} result=ALREADY_PROCESSED (not stored again)", shortId);
+        return reply(200, "ALREADY_PROCESSED");
     } catch (const std::exception& e) {
         return reply(500, "ERROR", e.what());
     }

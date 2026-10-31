@@ -4,10 +4,8 @@
 #include "resilientpos/server/ProcessedTransactionStore.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
-#include <string_view>
 
 namespace resilientpos::server {
 
@@ -18,17 +16,15 @@ namespace resilientpos::server {
 //
 // Runs on one thread: requests are handled one at a time, so the store never
 // sees concurrent writes. Each connection carries one request and is closed.
+// Diagnostics go to the spdlog default logger.
 class HttpTransactionServer {
 public:
-    using Logger = std::function<void(std::string_view)>;
-
     // Binds immediately; throws if the address/port is unavailable.
     // Port 0 picks a free port (see port()), which tests rely on.
     HttpTransactionServer(
         ProcessedTransactionStore& store,
         const std::string& address,
-        std::uint16_t port,
-        Logger logger = {}
+        std::uint16_t port
     );
     ~HttpTransactionServer();
 

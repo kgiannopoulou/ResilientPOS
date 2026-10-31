@@ -11,6 +11,7 @@ namespace resilientpos::storage {
 
 namespace {
 
+using core::TransactionStatus;
 using detail::Statement;
 
 constexpr std::string_view kSchema = R"sql(
@@ -56,6 +57,15 @@ core::Transaction readTransaction(const Statement& stmt)
     };
 }
 
+std::vector<core::Transaction> readAll(Statement& stmt)
+{
+    std::vector<core::Transaction> rows;
+    while (stmt.step()) {
+        rows.push_back(readTransaction(stmt));
+    }
+    return rows;
+}
+
 } // namespace
 
 void SQLiteTransactionRepository::Closer::operator()(sqlite3* db) const noexcept
@@ -70,6 +80,7 @@ SQLiteTransactionRepository::SQLiteTransactionRepository(const std::string& path
 
 void SQLiteTransactionRepository::save(const core::Transaction& transaction)
 {
+    const std::scoped_lock lock{mutex_};
     Statement stmt{db_.get(),
         "INSERT INTO transactions (id, amount_cents, status, created_at, sync_attempts) "
         "VALUES (?1, ?2, ?3, ?4, ?5)"};
@@ -84,6 +95,76 @@ void SQLiteTransactionRepository::save(const core::Transaction& transaction)
 std::optional<core::Transaction>
 SQLiteTransactionRepository::findById(const std::string& id)
 {
+    const std::scoped_lock lock{mutex_};
+    return findByIdLocked(id);
+}
+
+std::vector<core::Transaction> SQLiteTransactionRepository::findAll()
+{
+    const std::scoped_lock lock{mutex_};
+    Statement stmt{db_.get(), std::string{kSelectColumns} + "ORDER BY created_at, rowid"};
+    return readAll(stmt);
+}
+
+std::vector<core::Transaction> SQLiteTransactionRepository::findPending()
+{
+    const std::scoped_lock lock{mutex_};
+    Statement stmt{db_.get(),
+        std::string{kSelectColumns} + "WHERE status IN (?1, ?2) ORDER BY created_at, rowid"};
+    stmt.bind(1, core::toString(TransactionStatus::PendingSync));
+    stmt.bind(2, core::toString(TransactionStatus::Syncing));
+    return readAll(stmt);
+}
+
+void SQLiteTransactionRepository::updateStatus(const std::string& id, TransactionStatus status)
+{
+    const std::scoped_lock lock{mutex_};
+    const auto current = findByIdLocked(id);
+    if (!current) {
+        throw StorageError{"No transaction with id '" + id + "'"};
+    }
+    if (!core::canTransition(current->status, status)) {
+        throw core::InvalidTransitionError{current->status, status};
+    }
+    writeStatusLocked(id, status);
+}
+
+bool SQLiteTransactionRepository::tryUpdateStatus(
+    const std::string& id,
+    TransactionStatus expected,
+    TransactionStatus to)
+{
+    if (!core::canTransition(expected, to)) {
+        throw core::InvalidTransitionError{expected, to};
+    }
+
+    const std::scoped_lock lock{mutex_};
+    const auto current = findByIdLocked(id);
+    if (!current) {
+        throw StorageError{"No transaction with id '" + id + "'"};
+    }
+    if (current->status != expected) {
+        return false;
+    }
+    writeStatusLocked(id, to);
+    return true;
+}
+
+std::size_t SQLiteTransactionRepository::recoverInterrupted()
+{
+    const std::scoped_lock lock{mutex_};
+    // CREATED -> PENDING_SYNC and SYNCING -> PENDING_SYNC are both legal moves.
+    Statement stmt{db_.get(), "UPDATE transactions SET status = ?1 WHERE status IN (?2, ?3)"};
+    stmt.bind(1, core::toString(TransactionStatus::PendingSync));
+    stmt.bind(2, core::toString(TransactionStatus::Created));
+    stmt.bind(3, core::toString(TransactionStatus::Syncing));
+    stmt.step();
+    return static_cast<std::size_t>(sqlite3_changes(db_.get()));
+}
+
+std::optional<core::Transaction>
+SQLiteTransactionRepository::findByIdLocked(const std::string& id)
+{
     Statement stmt{db_.get(), std::string{kSelectColumns} + "WHERE id = ?1"};
     stmt.bind(1, id);
     if (!stmt.step()) {
@@ -92,34 +173,17 @@ SQLiteTransactionRepository::findById(const std::string& id)
     return readTransaction(stmt);
 }
 
-std::vector<core::Transaction> SQLiteTransactionRepository::findPending()
+void SQLiteTransactionRepository::writeStatusLocked(const std::string& id, TransactionStatus to)
 {
+    // Every move into SYNCING is one more attempt at getting the sale across.
     Statement stmt{db_.get(),
-        std::string{kSelectColumns} + "WHERE status IN (?1, ?2) ORDER BY created_at, rowid"};
-    stmt.bind(1, core::toString(core::TransactionStatus::PendingSync));
-    // SYNCING only survives in the database if the till stopped mid-sync;
-    // whether the server got it is unknown, so it must be sent again.
-    stmt.bind(2, core::toString(core::TransactionStatus::Syncing));
-
-    std::vector<core::Transaction> pending;
-    while (stmt.step()) {
-        pending.push_back(readTransaction(stmt));
-    }
-    return pending;
-}
-
-void SQLiteTransactionRepository::updateStatus(
-    const std::string& id,
-    core::TransactionStatus status)
-{
-    Statement stmt{db_.get(), "UPDATE transactions SET status = ?1 WHERE id = ?2"};
-    stmt.bind(1, core::toString(status));
+        "UPDATE transactions SET status = ?1, "
+        "sync_attempts = sync_attempts + CASE WHEN ?1 = ?3 THEN 1 ELSE 0 END "
+        "WHERE id = ?2"};
+    stmt.bind(1, core::toString(to));
     stmt.bind(2, id);
+    stmt.bind(3, core::toString(TransactionStatus::Syncing));
     stmt.step();
-
-    if (sqlite3_changes(db_.get()) == 0) {
-        throw StorageError{"No transaction with id '" + id + "'"};
-    }
 }
 
 } // namespace resilientpos::storage

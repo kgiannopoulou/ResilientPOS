@@ -1,63 +1,36 @@
-#include "resilientpos/storage/SQLiteTransactionRepository.hpp"
+// SyncEngine, one synchronous pass at a time, against in-memory fakes:
+// no SQLite, no sockets, no threads.
+
 #include "resilientpos/sync/SyncEngine.hpp"
-#include "TempDatabase.hpp"
+#include "fakes/FakeServerClient.hpp"
+#include "fakes/FakeTransactionRepository.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <map>
-#include <stdexcept>
+#include <chrono>
 #include <string>
-#include <string_view>
 #include <vector>
 
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
-using resilientpos::network::SendResult;
 using resilientpos::network::SendResultType;
-using resilientpos::network::ServerClient;
-using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::TransactionRepository;
 using resilientpos::sync::SyncEngine;
-using resilientpos::test::TempDatabase;
+using resilientpos::test::FakeServerClient;
+using resilientpos::test::FakeTransactionRepository;
 
 namespace {
 
-// Answers `defaultAnswer` unless an ID has its own scripted answer, and
-// records the order of sends and each row's stored status while in flight.
-class ScriptedServerClient final : public ServerClient {
-public:
-    ScriptedServerClient(TransactionRepository& repository, SendResultType defaultAnswer)
-        : repository_{repository}
-        , defaultAnswer_{defaultAnswer}
-    {
-    }
-
-    SendResult send(const Transaction& transaction) override
-    {
-        sentIds.push_back(transaction.id);
-        statusWhileSending.push_back(repository_.findById(transaction.id)->status);
-        if (throwFor == transaction.id) {
-            throw std::runtime_error{"socket exploded"};
-        }
-        const auto scripted = answers.find(transaction.id);
-        return {scripted != answers.end() ? scripted->second : defaultAnswer_, "scripted"};
-    }
-
-    std::map<std::string, SendResultType> answers;
-    std::string throwFor;
-    std::vector<std::string> sentIds;
-    std::vector<TransactionStatus> statusWhileSending;
-
-private:
-    TransactionRepository& repository_;
-    SendResultType defaultAnswer_;
-};
-
+// Saved with strictly increasing timestamps so "oldest first" is unambiguous.
 Transaction savePending(TransactionRepository& repository, Money amount)
 {
+    static auto clock = std::chrono::system_clock::now();
+    clock += std::chrono::seconds{1};
+
     auto tx = Transaction::create(amount);
     tx.status = TransactionStatus::PendingSync;
+    tx.createdAt = clock;
     repository.save(tx);
     return tx;
 }
@@ -66,79 +39,133 @@ Transaction savePending(TransactionRepository& repository, Money amount)
 
 TEST_CASE("Sync with an empty queue sends nothing", "[sync]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    ScriptedServerClient server{repository, SendResultType::Accepted};
+    FakeTransactionRepository repository;
+    FakeServerClient server;
     SyncEngine engine{repository, server};
 
     const auto report = engine.syncPendingTransactions();
 
-    REQUIRE(server.sentIds.empty());
+    REQUIRE(server.sentTransactions.empty());
     REQUIRE(report.attempted == 0);
     REQUIRE(report.synced == 0);
     REQUIRE(report.stillPending == 0);
 }
 
-TEST_CASE("Sync sends every pending transaction oldest first and marks it SYNCED", "[sync]")
+TEST_CASE("Sync loads pending transactions and sends them oldest first", "[sync]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
+    FakeTransactionRepository repository;
     const auto a = savePending(repository, Money{1000});
     const auto b = savePending(repository, Money{2000});
     const auto c = savePending(repository, Money{3000});
-    ScriptedServerClient server{repository, SendResultType::Accepted};
+    FakeServerClient server;
     SyncEngine engine{repository, server};
 
     const auto report = engine.syncPendingTransactions();
 
-    REQUIRE(server.sentIds == std::vector<std::string>{a.id, b.id, c.id});
+    REQUIRE(server.sentIds() == std::vector<std::string>{a.id, b.id, c.id});
+    REQUIRE(server.sentTransactions[1].amount == Money{2000});
     REQUIRE(report.attempted == 3);
-    REQUIRE(report.synced == 3);
+    REQUIRE(report.outcomes.size() == 3);
+}
+
+TEST_CASE("Sync success becomes SYNCED", "[sync]")
+{
+    FakeTransactionRepository repository;
+    const auto a = savePending(repository, Money{1000});
+    const auto b = savePending(repository, Money{2000});
+    FakeServerClient server;
+    SyncEngine engine{repository, server};
+
+    const auto report = engine.syncPendingTransactions();
+
+    REQUIRE(report.synced == 2);
     REQUIRE(report.failed == 0);
     REQUIRE(report.stillPending == 0);
-    for (const auto& tx : {a, b, c}) {
-        REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Synced);
-    }
+    REQUIRE(repository.findById(a.id)->status == TransactionStatus::Synced);
+    REQUIRE(repository.findById(b.id)->status == TransactionStatus::Synced);
 }
 
 TEST_CASE("Sync marks a transaction SYNCING while it is being sent", "[sync]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    savePending(repository, Money{1000});
-    ScriptedServerClient server{repository, SendResultType::Accepted};
+    FakeTransactionRepository repository;
+    const auto tx = savePending(repository, Money{1000});
+    FakeServerClient server;
+    std::vector<TransactionStatus> statusWhileSending;
+    server.onSend = [&](const Transaction& sent) {
+        statusWhileSending.push_back(repository.findById(sent.id)->status);
+    };
     SyncEngine engine{repository, server};
 
     engine.syncPendingTransactions();
 
-    REQUIRE(server.statusWhileSending == std::vector<TransactionStatus>{TransactionStatus::Syncing});
+    REQUIRE(statusWhileSending == std::vector<TransactionStatus>{TransactionStatus::Syncing});
+    REQUIRE(repository.findById(tx.id)->syncAttempts == 1);
 }
 
-TEST_CASE("Sync returns failed sends to PENDING_SYNC and carries on", "[sync][offline]")
+TEST_CASE("Sync network failure remains PENDING_SYNC", "[sync][offline]")
 {
-    for (const auto failure : {SendResultType::NetworkError, SendResultType::ServerError}) {
-        SQLiteTransactionRepository repository{":memory:"};
-        const auto a = savePending(repository, Money{1000});
-        const auto b = savePending(repository, Money{2000});
-        const auto c = savePending(repository, Money{3000});
-        ScriptedServerClient server{repository, SendResultType::Accepted};
-        server.answers[b.id] = failure;
-        SyncEngine engine{repository, server};
+    FakeTransactionRepository repository;
+    const auto tx = savePending(repository, Money{1000});
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::NetworkError, "connection refused"};
+    SyncEngine engine{repository, server};
 
-        const auto report = engine.syncPendingTransactions();
+    const auto report = engine.syncPendingTransactions();
 
-        REQUIRE(server.sentIds.size() == 3);  // one failure does not stop the pass
-        REQUIRE(report.synced == 2);
-        REQUIRE(report.failed == 1);
-        REQUIRE(report.stillPending == 1);
-        REQUIRE(repository.findById(a.id)->status == TransactionStatus::Synced);
-        REQUIRE(repository.findById(b.id)->status == TransactionStatus::PendingSync);
-        REQUIRE(repository.findById(c.id)->status == TransactionStatus::Synced);
-    }
+    REQUIRE(report.failed == 1);
+    REQUIRE(report.stillPending == 1);
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::PendingSync);
+    REQUIRE(report.outcomes.front().result == SendResultType::NetworkError);
+    REQUIRE(report.outcomes.front().message == "connection refused");
 }
 
-TEST_CASE("Sync treats ALREADY_PROCESSED as success", "[sync][idempotency]")
+TEST_CASE("Sync stops the pass at the first network error", "[sync][offline]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
+    FakeTransactionRepository repository;
+    const auto a = savePending(repository, Money{1000});
+    const auto b = savePending(repository, Money{2000});
+    const auto c = savePending(repository, Money{3000});
+    FakeServerClient server;
+    server.resultFor[b.id] = SendResultType::NetworkError;
+    SyncEngine engine{repository, server};
+
+    const auto report = engine.syncPendingTransactions();
+
+    // Server unreachable: no point waiting for c to time out too.
+    REQUIRE(server.sentIds() == std::vector<std::string>{a.id, b.id});
+    REQUIRE(report.synced == 1);
+    REQUIRE(report.failed == 1);
+    REQUIRE(report.stillPending == 2);
+    REQUIRE(repository.findById(c.id)->status == TransactionStatus::PendingSync);
+    REQUIRE(repository.findById(c.id)->syncAttempts == 0);
+}
+
+TEST_CASE("Sync carries on past a server error", "[sync]")
+{
+    FakeTransactionRepository repository;
+    const auto a = savePending(repository, Money{1000});
+    const auto b = savePending(repository, Money{2000});
+    const auto c = savePending(repository, Money{3000});
+    FakeServerClient server;
+    server.resultFor[b.id] = SendResultType::ServerError;
+    SyncEngine engine{repository, server};
+
+    const auto report = engine.syncPendingTransactions();
+
+    REQUIRE(server.sendCount() == 3);
+    REQUIRE(report.synced == 2);
+    REQUIRE(report.failed == 1);
+    REQUIRE(repository.findById(a.id)->status == TransactionStatus::Synced);
+    REQUIRE(repository.findById(b.id)->status == TransactionStatus::PendingSync);
+    REQUIRE(repository.findById(c.id)->status == TransactionStatus::Synced);
+}
+
+TEST_CASE("Sync AlreadyProcessed becomes SYNCED", "[sync][idempotency]")
+{
+    FakeTransactionRepository repository;
     const auto tx = savePending(repository, Money{1040});
-    ScriptedServerClient server{repository, SendResultType::AlreadyProcessed};
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::AlreadyProcessed, "duplicate"};
     SyncEngine engine{repository, server};
 
     const auto report = engine.syncPendingTransactions();
@@ -151,10 +178,10 @@ TEST_CASE("Sync treats ALREADY_PROCESSED as success", "[sync][idempotency]")
 
 TEST_CASE("Sync keeps a transaction pending if the client throws", "[sync][offline]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
+    FakeTransactionRepository repository;
     const auto tx = savePending(repository, Money{1000});
-    ScriptedServerClient server{repository, SendResultType::Accepted};
-    server.throwFor = tx.id;
+    FakeServerClient server;
+    server.throwOnSend = true;
     SyncEngine engine{repository, server};
 
     const auto report = engine.syncPendingTransactions();
@@ -165,67 +192,47 @@ TEST_CASE("Sync keeps a transaction pending if the client throws", "[sync][offli
 
 TEST_CASE("Synced transactions are not sent again", "[sync]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
+    FakeTransactionRepository repository;
     savePending(repository, Money{1000});
-    ScriptedServerClient server{repository, SendResultType::Accepted};
+    FakeServerClient server;
     SyncEngine engine{repository, server};
 
     engine.syncPendingTransactions();
     const auto second = engine.syncPendingTransactions();
 
-    REQUIRE(server.sentIds.size() == 1);
+    REQUIRE(server.sendCount() == 1);
     REQUIRE(second.attempted == 0);
 }
 
-TEST_CASE("Sync resends a transaction left SYNCING by a crash", "[sync][durability]")
+TEST_CASE("Sync leaves sales the service is still sending alone", "[sync]")
 {
-    TempDatabase db;
-    std::string id;
-    {
-        SQLiteTransactionRepository repository{db.path()};
-        id = savePending(repository, Money{1000}).id;
-        repository.updateStatus(id, TransactionStatus::Syncing);
-    } // till dies mid-sync
-
-    SQLiteTransactionRepository repository{db.path()};
-    ScriptedServerClient server{repository, SendResultType::AlreadyProcessed};
+    FakeTransactionRepository repository;
+    FakeServerClient server;
     SyncEngine engine{repository, server};
+    // Saved after the engine started: a live sale mid-send, not a crash leftover.
+    repository.save(Transaction::create(Money{1000}));  // CREATED
 
     const auto report = engine.syncPendingTransactions();
 
-    REQUIRE(server.sentIds == std::vector<std::string>{id});
-    REQUIRE(report.synced == 1);
-    REQUIRE(repository.findById(id)->status == TransactionStatus::Synced);
+    REQUIRE(report.attempted == 0);
+    REQUIRE(server.sentTransactions.empty());
 }
 
-TEST_CASE("Sync logs each outcome and a summary", "[sync]")
+TEST_CASE("Engine startup requeues sales a crash left in flight", "[sync][durability]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    const auto accepted = savePending(repository, Money{1000});
-    const auto duplicate = savePending(repository, Money{2000});
-    const auto offline = savePending(repository, Money{3000});
-    ScriptedServerClient server{repository, SendResultType::Accepted};
-    server.answers[duplicate.id] = SendResultType::AlreadyProcessed;
-    server.answers[offline.id] = SendResultType::NetworkError;
+    FakeTransactionRepository repository;
+    const auto created = Transaction::create(Money{1000});  // died during the first send
+    repository.save(created);
+    const auto syncing = savePending(repository, Money{2000});
+    repository.updateStatus(syncing.id, TransactionStatus::Syncing);  // died during a resend
 
-    std::vector<std::string> lines;
-    SyncEngine engine{repository, server, [&lines](std::string_view line) {
-        lines.emplace_back(line);
-    }};
-    engine.syncPendingTransactions();
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::AlreadyProcessed, "duplicate"};
+    SyncEngine engine{repository, server};  // recovery happens here
 
-    const auto contains = [&lines](const std::string& text) {
-        for (const auto& line : lines) {
-            if (line == text) {
-                return true;
-            }
-        }
-        return false;
-    };
-    REQUIRE(lines.front() == "[SYNC] Starting synchronization...");
-    REQUIRE(contains("[SYNC] " + accepted.id.substr(0, 8) + " → SUCCESS"));
-    REQUIRE(contains("[SYNC] " + duplicate.id.substr(0, 8) + " → already processed by server"));
-    REQUIRE(contains("[SYNC] " + duplicate.id.substr(0, 8) + " → SYNCED"));
-    REQUIRE(contains("2 transactions synchronized."));
-    REQUIRE(lines.back() == "1 transactions pending.");
+    const auto report = engine.syncPendingTransactions();
+
+    REQUIRE(report.synced == 2);
+    REQUIRE(repository.findById(created.id)->status == TransactionStatus::Synced);
+    REQUIRE(repository.findById(syncing.id)->status == TransactionStatus::Synced);
 }

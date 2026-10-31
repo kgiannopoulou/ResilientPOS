@@ -1,6 +1,9 @@
 #include "resilientpos/service/TransactionService.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <exception>
+#include <utility>
 
 namespace resilientpos::service {
 
@@ -10,21 +13,24 @@ using network::SendResultType;
 
 TransactionService::TransactionService(
     storage::TransactionRepository& repository,
-    network::ServerClient& serverClient)
+    network::ServerClient& serverClient,
+    TransactionEvents events)
     : repository_{repository}
     , serverClient_{serverClient}
+    , events_{std::move(events)}
 {
 }
 
 core::Transaction TransactionService::createTransaction(core::Money amount)
 {
     auto transaction = core::Transaction::create(amount);
+    const auto shortId = transaction.id.substr(0, 8);
 
-    // Saved as PENDING_SYNC rather than CREATED: if the till dies while the
-    // request is in flight, the sale is already queued for the sync worker
-    // instead of stuck in a state nothing picks up.
-    transaction.status = TransactionStatus::PendingSync;
     repository_.save(transaction);  // throws -> nothing was sent, sale not taken
+    spdlog::info("Transaction created id={} amount={}", shortId, amount.cents());
+    if (events_.persisted) {
+        events_.persisted(transaction);
+    }
 
     // Only after successful persistence.
     try {
@@ -36,11 +42,25 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
     }
 
     // Accepted and AlreadyProcessed both mean the server holds it.
-    // If this update fails after the server accepted, the row stays
-    // PENDING_SYNC and the resend gets ALREADY_PROCESSED: still no duplicate.
+    // If this update fails after the server accepted, the row stays CREATED,
+    // is requeued on restart and the resend gets ALREADY_PROCESSED: still no
+    // duplicate.
     transaction.status = lastSendResult_.successful() ? TransactionStatus::Synced
                                                       : TransactionStatus::PendingSync;
     repository_.updateStatus(transaction.id, transaction.status);
+
+    if (lastSendResult_.successful()) {
+        spdlog::info("Transaction synced id={} result={}",
+                     shortId, network::toString(lastSendResult_.type));
+    } else {
+        spdlog::warn("Server unavailable id={} result={} reason=\"{}\"",
+                     shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
+        spdlog::info("Transaction queued id={} status=PENDING_SYNC", shortId);
+    }
+
+    if (events_.completed) {
+        events_.completed(transaction, lastSendResult_);
+    }
     return transaction;
 }
 

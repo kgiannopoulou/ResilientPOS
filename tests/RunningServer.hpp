@@ -8,11 +8,12 @@
 
 namespace resilientpos::test {
 
-// Runs a server on a free local port for the lifetime of the object.
+// Runs a server for the lifetime of the object, on a free local port unless
+// a specific one is given (e.g. to bring back a server that was "down").
 class RunningServer {
 public:
-    explicit RunningServer(server::ProcessedTransactionStore& store)
-        : server_{store, "127.0.0.1", 0}
+    explicit RunningServer(server::ProcessedTransactionStore& store, std::uint16_t port = 0)
+        : server_{store, "127.0.0.1", port}
         , thread_{[this] { server_.run(); }}
     {
     }
@@ -37,6 +38,7 @@ private:
 };
 
 // A port that nothing is listening on: bind one, then shut the server down.
+// A RunningServer may later be started on it to simulate the server coming back.
 inline std::uint16_t closedPort()
 {
     server::ProcessedTransactionStore store{":memory:"};

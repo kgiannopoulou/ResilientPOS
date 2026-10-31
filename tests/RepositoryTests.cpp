@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 
+using resilientpos::core::InvalidTransitionError;
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
@@ -90,8 +91,103 @@ TEST_CASE("Repository updates status", "[repository]")
     repository.updateStatus(tx.id, TransactionStatus::PendingSync);
     REQUIRE(repository.findById(tx.id)->status == TransactionStatus::PendingSync);
 
+    repository.updateStatus(tx.id, TransactionStatus::Syncing);
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Syncing);
+
     repository.updateStatus(tx.id, TransactionStatus::Synced);
     REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Synced);
+}
+
+TEST_CASE("Repository rejects transitions the state machine forbids", "[repository][state-machine]")
+{
+    SQLiteTransactionRepository repository{":memory:"};
+    const auto tx = Transaction::create(Money{350});
+    repository.save(tx);
+    repository.updateStatus(tx.id, TransactionStatus::Synced);
+
+    REQUIRE_THROWS_AS(repository.updateStatus(tx.id, TransactionStatus::Created),
+                      InvalidTransitionError);
+    REQUIRE_THROWS_AS(repository.updateStatus(tx.id, TransactionStatus::PendingSync),
+                      InvalidTransitionError);
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Synced);
+}
+
+TEST_CASE("Repository compare-and-set only moves a row in the expected state", "[repository]")
+{
+    SQLiteTransactionRepository repository{":memory:"};
+    auto tx = Transaction::create(Money{350});
+    tx.status = TransactionStatus::PendingSync;
+    repository.save(tx);
+
+    // First claim wins, a second claim on the same row loses.
+    REQUIRE(repository.tryUpdateStatus(tx.id, TransactionStatus::PendingSync, TransactionStatus::Syncing));
+    REQUIRE_FALSE(repository.tryUpdateStatus(tx.id, TransactionStatus::PendingSync, TransactionStatus::Syncing));
+    REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Syncing);
+
+    REQUIRE_THROWS_AS(
+        repository.tryUpdateStatus(tx.id, TransactionStatus::Synced, TransactionStatus::Created),
+        InvalidTransitionError);
+    REQUIRE_THROWS_AS(
+        repository.tryUpdateStatus("missing", TransactionStatus::PendingSync, TransactionStatus::Syncing),
+        StorageError);
+}
+
+TEST_CASE("Repository counts every move into SYNCING as a sync attempt", "[repository]")
+{
+    SQLiteTransactionRepository repository{":memory:"};
+    auto tx = Transaction::create(Money{350});
+    tx.status = TransactionStatus::PendingSync;
+    repository.save(tx);
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        repository.updateStatus(tx.id, TransactionStatus::Syncing);
+        repository.updateStatus(tx.id, TransactionStatus::PendingSync);
+    }
+
+    REQUIRE(repository.findById(tx.id)->syncAttempts == 3);
+}
+
+TEST_CASE("Repository requeues sales that were in flight when the till died", "[repository][durability]")
+{
+    TempDatabase db;
+    const auto inFlightFirstSend = Transaction::create(Money{100});  // CREATED
+    auto inFlightResend = Transaction::create(Money{200});
+    inFlightResend.status = TransactionStatus::Syncing;
+    auto synced = Transaction::create(Money{300});
+    synced.status = TransactionStatus::Synced;
+    {
+        SQLiteTransactionRepository repository{db.path()};
+        repository.save(inFlightFirstSend);
+        repository.save(inFlightResend);
+        repository.save(synced);
+    } // crash
+
+    SQLiteTransactionRepository reopened{db.path()};
+    REQUIRE(reopened.recoverInterrupted() == 2);
+
+    REQUIRE(reopened.findById(inFlightFirstSend.id)->status == TransactionStatus::PendingSync);
+    REQUIRE(reopened.findById(inFlightResend.id)->status == TransactionStatus::PendingSync);
+    REQUIRE(reopened.findById(synced.id)->status == TransactionStatus::Synced);
+    REQUIRE(reopened.recoverInterrupted() == 0);
+}
+
+TEST_CASE("Repository lists every transaction oldest first", "[repository]")
+{
+    SQLiteTransactionRepository repository{":memory:"};
+    const auto now = std::chrono::system_clock::now();
+    auto older = Transaction::create(Money{100});
+    older.createdAt = now - std::chrono::minutes{1};
+    auto newer = Transaction::create(Money{200});
+    newer.createdAt = now;
+    newer.status = TransactionStatus::Synced;
+    repository.save(newer);
+    repository.save(older);
+
+    const auto all = repository.findAll();
+
+    REQUIRE(all.size() == 2);
+    REQUIRE(all[0].id == older.id);
+    REQUIRE(all[1].id == newer.id);
 }
 
 TEST_CASE("Repository throws when updating an unknown ID", "[repository]")
@@ -146,6 +242,7 @@ TEST_CASE("Repository returns a transaction left SYNCING by an interrupted sync"
     {
         SQLiteTransactionRepository repository{db.path()};
         repository.save(tx);
+        repository.updateStatus(tx.id, TransactionStatus::PendingSync);
         repository.updateStatus(tx.id, TransactionStatus::Syncing);
     } // till dies before the server's answer arrives
 

@@ -26,6 +26,18 @@ endif()
 
 option(RESILIENTPOS_BUILD_TESTS "Build unit tests" ON)
 
+# Sanitizers (GCC/Clang), e.g. -DRESILIENTPOS_SANITIZE=address,undefined or
+# -DRESILIENTPOS_SANITIZE=thread. Applied globally, before any dependency is
+# fetched, so SQLite, Boost and Catch2 are instrumented too (TSan needs that).
+set(RESILIENTPOS_SANITIZE "" CACHE STRING "Comma-separated -fsanitize= list (empty = off)")
+if(RESILIENTPOS_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "RESILIENTPOS_SANITIZE is only supported with GCC/Clang")
+    endif()
+    add_compile_options(-fsanitize=${RESILIENTPOS_SANITIZE} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+    add_link_options(-fsanitize=${RESILIENTPOS_SANITIZE})
+endif()
+
 include(FetchContent)
 
 # --- SQLite (amalgamation, pinned and hash-checked) ----------------------------
@@ -65,15 +77,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Boost)
 
+# --- spdlog (structured diagnostics; bundled fmt) -------------------------------
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG        v1.14.1
+    GIT_SHALLOW    TRUE
+    SYSTEM
+)
+FetchContent_MakeAvailable(spdlog)
+
 # --- Core library ------------------------------------------------------------
 add_library(resilientpos_core
     src/core/Money.cpp
     src/core/TransactionStatus.cpp
     src/core/Transaction.cpp
     src/util/UuidGenerator.cpp
+    src/util/Logging.cpp
     src/storage/SQLiteTransactionRepository.cpp
     src/network/SendResult.cpp
     src/network/HttpServerClient.cpp
+    src/network/MonitoredServerClient.cpp
     src/service/TransactionService.cpp
     src/sync/RetryPolicy.cpp
     src/sync/SyncEngine.cpp
@@ -87,7 +111,7 @@ target_include_directories(resilientpos_core
     PRIVATE ${PROJECT_SOURCE_DIR}/src)
 # Boost stays an implementation detail: no public header includes it.
 target_link_libraries(resilientpos_core
-    PUBLIC  sqlite3
+    PUBLIC  sqlite3 spdlog::spdlog
     PRIVATE Boost::asio Boost::beast Boost::json resilientpos_warnings)
 if(MSVC)
     target_compile_options(resilientpos_core PUBLIC /utf-8)
@@ -117,20 +141,21 @@ if(RESILIENTPOS_BUILD_TESTS)
     enable_testing()
 
     add_executable(resilientpos_tests
+        tests/TestLogging.cpp
         tests/MoneyTests.cpp
         tests/TransactionStatusTests.cpp
         tests/UuidGeneratorTests.cpp
         tests/TransactionTests.cpp
         tests/RepositoryTests.cpp
         tests/SendResultTests.cpp
-        tests/ProcessedTransactionStoreTests.cpp
-        tests/TransactionHandlerTests.cpp
+        tests/ServerTests.cpp
         tests/TransactionServiceTests.cpp
-        tests/HttpIntegrationTests.cpp
         tests/RetryPolicyTests.cpp
         tests/SyncEngineTests.cpp
-        tests/FailureSimulationTests.cpp
+        tests/SyncWorkerTests.cpp
+        tests/IntegrationTests.cpp
     )
+    target_include_directories(resilientpos_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
     target_link_libraries(resilientpos_tests
         PRIVATE resilientpos_core resilientpos_warnings Catch2::Catch2WithMain)
 

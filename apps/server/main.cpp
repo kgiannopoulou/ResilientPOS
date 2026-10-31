@@ -1,8 +1,13 @@
 #include "resilientpos/server/HttpTransactionServer.hpp"
 #include "resilientpos/server/NetworkSimulationMode.hpp"
 #include "resilientpos/server/ProcessedTransactionStore.hpp"
+#include "resilientpos/util/Logging.hpp"
+
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
 
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -14,9 +19,11 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using resilientpos::server::HttpTransactionServer;
+using resilientpos::server::kAllNetworkSimulationModes;
 using resilientpos::server::NetworkSimulationMode;
 using resilientpos::server::ProcessedTransactionStore;
 using resilientpos::server::networkSimulationModeFromString;
@@ -27,7 +34,7 @@ namespace {
 constexpr std::string_view kDefaultDatabase = "data/server.db";
 constexpr std::uint16_t kDefaultPort = 8080;
 
-// Server log lines and menu output come from two threads.
+// Menu output comes from the stdin thread while the server thread logs.
 std::mutex outputMutex;
 
 void print(std::string_view text)
@@ -47,18 +54,20 @@ std::uint16_t parsePort(std::string_view text)
     return port;
 }
 
-constexpr std::string_view kMenu =
-    "Network Simulation\n"
-    "  1. Normal\n"
-    "  2. 500 ms latency\n"
-    "  3. Reject (503, not stored)\n"
-    "  4. Timeout (never answers, not stored)\n"
-    "  5. Drop response after processing (stored, no answer)\n"
-    "  q. Stop server\n";
-
-std::string describe(NetworkSimulationMode mode)
+std::string menu()
 {
-    return "[SIM] Mode: " + std::string{toString(mode)} + '\n';
+    std::string text = "Network Simulation\n";
+    for (std::size_t i = 0; i < kAllNetworkSimulationModes.size(); ++i) {
+        text += "  " + std::to_string(i + 1) + ". "
+              + std::string{describe(kAllNetworkSimulationModes[i])} + '\n';
+    }
+    text += "  q. Stop server\n";
+    return text;
+}
+
+std::string describeMode(NetworkSimulationMode mode)
+{
+    return "[SIM] Mode: " + std::string{toString(mode)} + " - " + std::string{describe(mode)} + '\n';
 }
 
 // Reads menu choices from stdin. Runs detached: when stdin is closed (server
@@ -67,32 +76,31 @@ void runMenu(HttpTransactionServer& server)
 {
     std::string line;
     while (std::getline(std::cin, line)) {
-        const std::string_view choice = line.empty() ? std::string_view{} : std::string_view{line}.substr(0, 1);
-        if (choice == "q") {
+        if (!line.empty() && line[0] == 'q') {
             server.stop();
             return;
         }
 
-        constexpr NetworkSimulationMode kByChoice[] = {
-            NetworkSimulationMode::Normal,
-            NetworkSimulationMode::Latency,
-            NetworkSimulationMode::Reject,
-            NetworkSimulationMode::Timeout,
-            NetworkSimulationMode::DropResponseAfterProcessing,
-        };
-        if (choice.size() == 1 && choice[0] >= '1' && choice[0] <= '5') {
-            const auto mode = kByChoice[choice[0] - '1'];
+        const int index = line.empty() ? -1 : line[0] - '1';
+        if (index >= 0 && index < static_cast<int>(kAllNetworkSimulationModes.size())) {
+            const auto mode = kAllNetworkSimulationModes[static_cast<std::size_t>(index)];
             server.setSimulationMode(mode);
-            print(describe(mode));
+            print(describeMode(mode));
         } else {
-            print(kMenu);
+            print(menu());
         }
     }
 }
 
+void setUpLogging()
+{
+    resilientpos::util::installDefaultLogger(spdlog::stdout_color_mt("server"));
+}
+
 } // namespace
 
-// Usage: resilient-server [--mode normal|latency|reject|timeout|drop] [port] [database]
+// Usage: resilient-server [--mode normal|latency|random|timeout|drop-before|drop-after|reject]
+//                         [port] [database]
 int main(int argc, char* argv[])
 {
     std::cout << "======= ResilientPOS Server ========\n";
@@ -110,7 +118,7 @@ int main(int argc, char* argv[])
                 if (!parsed) {
                     throw std::invalid_argument{
                         "Unknown mode '" + std::string{argv[i]}
-                        + "' (normal, latency, reject, timeout, drop)"};
+                        + "' (normal, latency, random, timeout, drop-before, drop-after, reject)"};
                 }
                 mode = *parsed;
             } else {
@@ -126,18 +134,17 @@ int main(int argc, char* argv[])
         if (databasePath.has_parent_path()) {
             std::filesystem::create_directories(databasePath.parent_path());
         }
+        setUpLogging();
         ProcessedTransactionStore store{databasePath.string()};
 
-        HttpTransactionServer server{store, "127.0.0.1", port, [](std::string_view line) {
-            print("[SERVER] " + std::string{line} + '\n');
-        }};
-        server.setSimulationMode(mode);
+        HttpTransactionServer server{store, "127.0.0.1", port};
 
         print("Database: " + databasePath.string() + " (" + std::to_string(store.count())
               + " processed)\n"
               + "Listening on http://127.0.0.1:" + std::to_string(server.port()) + "/transactions\n"
               + "Press Ctrl+C to stop.\n\n"
-              + std::string{kMenu} + describe(mode) + '\n');
+              + menu() + describeMode(mode) + '\n');
+        server.setSimulationMode(mode);
 
         std::thread{runMenu, std::ref(server)}.detach();
         server.run(/*handleSignals=*/true);

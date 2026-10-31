@@ -77,3 +77,26 @@ TEST_CASE("Money multiplication throws on overflow", "[money]")
     REQUIRE_THROWS_AS(Money{max} * 2, std::overflow_error);
     REQUIRE_THROWS_AS(Money{max / 2 + 1} * -3, std::overflow_error);
 }
+
+TEST_CASE("Money parses what a cashier types", "[money][parse]")
+{
+    using resilientpos::core::parseMoney;
+
+    REQUIRE(parseMoney("3.50") == Money{350});
+    REQUIRE(parseMoney("3.5") == Money{350});
+    REQUIRE(parseMoney("3") == Money{300});
+    REQUIRE(parseMoney("3,50") == Money{350});
+    REQUIRE(parseMoney("0.05") == Money{5});
+    REQUIRE(parseMoney(formatMoney(Money{1234})) == Money{1234});  // accepts the euro sign
+}
+
+TEST_CASE("Money rejects malformed prices", "[money][parse]")
+{
+    using resilientpos::core::parseMoney;
+
+    for (const char* text : {"", "abc", "-3.50", "3.505", "3.", ".50", "3.5a", "1 000",
+                             "99999999999999999999"}) {
+        INFO("input: " << text);
+        REQUIRE_FALSE(parseMoney(text).has_value());
+    }
+}

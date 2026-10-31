@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace resilientpos::core {
 
@@ -35,6 +37,12 @@ bool operator==(const Money& lhs, const Money& rhs);
 // Money{350} -> "€3.50", Money{-5} -> "-€0.05"
 [[nodiscard]]
 std::string formatMoney(const Money& money);
+
+// What a cashier types for a price: "3.50", "3.5", "3", "3,50" or "€3.50"
+// -> Money{350}. Parsed digit by digit, never through a double. Negative,
+// more than two decimals, garbage or out-of-range input -> nullopt.
+[[nodiscard]]
+std::optional<Money> parseMoney(std::string_view text);
 
 std::ostream& operator<<(std::ostream& os, const Money& money);
 

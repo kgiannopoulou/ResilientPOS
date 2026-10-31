@@ -1,75 +1,61 @@
 #include "resilientpos/service/TransactionService.hpp"
 #include "resilientpos/storage/SQLiteTransactionRepository.hpp"
+#include "resilientpos/storage/StorageError.hpp"
+#include "fakes/FakeServerClient.hpp"
+#include "fakes/FakeTransactionRepository.hpp"
 #include "TempDatabase.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <optional>
-#include <stdexcept>
 #include <string>
+#include <vector>
 
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
 using resilientpos::network::SendResult;
 using resilientpos::network::SendResultType;
-using resilientpos::network::ServerClient;
+using resilientpos::service::TransactionEvents;
 using resilientpos::service::TransactionService;
 using resilientpos::storage::SQLiteTransactionRepository;
-using resilientpos::storage::TransactionRepository;
+using resilientpos::storage::StorageError;
+using resilientpos::test::FakeServerClient;
+using resilientpos::test::FakeTransactionRepository;
 using resilientpos::test::TempDatabase;
 
-namespace {
-
-// Answers every send with a fixed result and records what the repository
-// held at the moment of sending, to prove "persist first, send second".
-class FakeServerClient final : public ServerClient {
-public:
-    FakeServerClient(TransactionRepository& repository, SendResultType answer)
-        : repository_{repository}
-        , answer_{answer}
-    {
-    }
-
-    SendResult send(const Transaction& transaction) override
-    {
-        ++calls;
-        storedWhenSent = repository_.findById(transaction.id);
-        if (throwInstead) {
-            throw std::runtime_error{"socket exploded"};
-        }
-        return {answer_, "fake"};
-    }
-
-    int calls{0};
-    bool throwInstead{false};
-    std::optional<Transaction> storedWhenSent;
-
-private:
-    TransactionRepository& repository_;
-    SendResultType answer_;
-};
-
-} // namespace
-
-TEST_CASE("Service saves the transaction before sending it", "[service]")
+TEST_CASE("Service persists the transaction before sending it", "[service]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    FakeServerClient server{repository, SendResultType::Accepted};
+    FakeTransactionRepository repository;
+    FakeServerClient server;
+    std::optional<Transaction> storedWhenSent;
+    server.onSend = [&](const Transaction& tx) { storedWhenSent = repository.findById(tx.id); };
     TransactionService service{repository, server};
 
     const auto tx = service.createTransaction(Money{700});
 
-    REQUIRE(server.calls == 1);
-    REQUIRE(server.storedWhenSent.has_value());
-    REQUIRE(server.storedWhenSent->id == tx.id);
-    REQUIRE(server.storedWhenSent->status == TransactionStatus::PendingSync);
+    REQUIRE(server.sentTransactions.size() == 1);
+    REQUIRE(storedWhenSent.has_value());
+    REQUIRE(storedWhenSent->id == tx.id);
+    // CREATED while in flight: the sync worker leaves it alone.
+    REQUIRE(storedWhenSent->status == TransactionStatus::Created);
 }
 
-TEST_CASE("Service marks an accepted transaction SYNCED", "[service]")
+TEST_CASE("Service sends nothing if the sale cannot be stored", "[service]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    FakeServerClient server{repository, SendResultType::Accepted};
+    FakeTransactionRepository repository;
+    repository.failSaves = true;
+    FakeServerClient server;
+    TransactionService service{repository, server};
+
+    REQUIRE_THROWS_AS(service.createTransaction(Money{700}), StorageError);
+    REQUIRE(server.sentTransactions.empty());
+}
+
+TEST_CASE("Service marks a successful send SYNCED", "[service]")
+{
+    FakeTransactionRepository repository;
+    FakeServerClient server;
     TransactionService service{repository, server};
 
     const auto tx = service.createTransaction(Money{700});
@@ -83,8 +69,9 @@ TEST_CASE("Service marks an accepted transaction SYNCED", "[service]")
 
 TEST_CASE("Service treats ALREADY_PROCESSED as synced", "[service][idempotency]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    FakeServerClient server{repository, SendResultType::AlreadyProcessed};
+    FakeTransactionRepository repository;
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::AlreadyProcessed, "duplicate"};
     TransactionService service{repository, server};
 
     const auto tx = service.createTransaction(Money{700});
@@ -92,11 +79,12 @@ TEST_CASE("Service treats ALREADY_PROCESSED as synced", "[service][idempotency]"
     REQUIRE(repository.findById(tx.id)->status == TransactionStatus::Synced);
 }
 
-TEST_CASE("Service keeps the sale as PENDING_SYNC when the server is unreachable", "[service][offline]")
+TEST_CASE("Service turns a network failure into PENDING_SYNC", "[service][offline]")
 {
     for (const auto failure : {SendResultType::NetworkError, SendResultType::ServerError}) {
-        SQLiteTransactionRepository repository{":memory:"};
-        FakeServerClient server{repository, failure};
+        FakeTransactionRepository repository;
+        FakeServerClient server;
+        server.resultToReturn = {failure, "down"};
         TransactionService service{repository, server};
 
         const auto tx = service.createTransaction(Money{550});
@@ -111,9 +99,9 @@ TEST_CASE("Service keeps the sale as PENDING_SYNC when the server is unreachable
 
 TEST_CASE("Service keeps the sale if the client throws instead of reporting", "[service][offline]")
 {
-    SQLiteTransactionRepository repository{":memory:"};
-    FakeServerClient server{repository, SendResultType::Accepted};
-    server.throwInstead = true;
+    FakeTransactionRepository repository;
+    FakeServerClient server;
+    server.throwOnSend = true;
     TransactionService service{repository, server};
 
     const auto tx = service.createTransaction(Money{700});
@@ -123,12 +111,38 @@ TEST_CASE("Service keeps the sale if the client throws instead of reporting", "[
     REQUIRE(repository.findPending().size() == 1);
 }
 
-TEST_CASE("Offline sales survive a POS restart", "[service][offline]")
+TEST_CASE("Service reports progress through its events", "[service]")
+{
+    FakeTransactionRepository repository;
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::NetworkError, "down"};
+
+    std::vector<std::string> events;
+    TransactionService service{repository, server, TransactionEvents{
+        .persisted = [&](const Transaction& tx) {
+            events.push_back("persisted " + std::string{toString(tx.status)});
+        },
+        .completed = [&](const Transaction& tx, const SendResult& result) {
+            events.push_back("completed " + std::string{toString(tx.status)} + " "
+                             + std::string{toString(result.type)});
+        },
+    }};
+
+    (void)service.createTransaction(Money{700});
+
+    REQUIRE(events == std::vector<std::string>{
+        "persisted CREATED",
+        "completed PENDING_SYNC NETWORK_ERROR",
+    });
+}
+
+TEST_CASE("Offline sales survive a POS restart", "[service][offline][durability]")
 {
     TempDatabase db;
     {
         SQLiteTransactionRepository repository{db.path()};
-        FakeServerClient server{repository, SendResultType::NetworkError};
+        FakeServerClient server;
+        server.resultToReturn = {SendResultType::NetworkError, "down"};
         TransactionService service{repository, server};
 
         service.createTransaction(Money{550});

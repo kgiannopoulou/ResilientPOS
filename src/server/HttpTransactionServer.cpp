@@ -5,10 +5,12 @@
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <random>
 #include <utility>
 
 namespace asio = boost::asio;
@@ -23,19 +25,38 @@ namespace {
 constexpr auto kSessionTimeout = std::chrono::seconds{10};
 constexpr std::size_t kMaxBodyBytes = 16 * 1024;
 
+// The configured mode, and the dice for RandomFailure. Only the io_context
+// thread rolls the dice; the mode itself may be changed from any thread.
+struct ModeSource {
+    std::atomic<NetworkSimulationMode> mode{NetworkSimulationMode::Normal};
+    std::mt19937 rng{std::random_device{}()};
+
+    // What to do with this particular request. RandomFailure resolves to
+    // Normal half the time and to each kind of drop a quarter of the time.
+    NetworkSimulationMode pick()
+    {
+        const auto configured = mode.load();
+        if (configured != NetworkSimulationMode::RandomFailure) {
+            return configured;
+        }
+        switch (std::uniform_int_distribution<int>{0, 3}(rng)) {
+        case 0:  return NetworkSimulationMode::DropBeforeProcessing;
+        case 1:  return NetworkSimulationMode::DropAfterProcessing;
+        default: return NetworkSimulationMode::Normal;
+        }
+    }
+};
+
 // One accepted connection: read a request, write the response, close.
 // The simulation mode in force when the request arrives decides how
 // (or whether) it is answered.
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    Session(tcp::socket socket, ProcessedTransactionStore& store,
-            const HttpTransactionServer::Logger& logger,
-            const std::atomic<NetworkSimulationMode>& mode)
+    Session(tcp::socket socket, ProcessedTransactionStore& store, ModeSource& modes)
         : stream_{std::move(socket)}
         , timer_{stream_.get_executor()}
         , store_{store}
-        , logger_{logger}
-        , mode_{mode}
+        , modes_{modes}
     {
         parser_.body_limit(kMaxBodyBytes);
     }
@@ -74,7 +95,7 @@ private:
             return;
         }
 
-        switch (mode_.load()) {
+        switch (modes_.pick()) {
         case NetworkSimulationMode::Normal:
             process();
             break;
@@ -88,8 +109,9 @@ private:
             });
             break;
 
+        case NetworkSimulationMode::RandomFailure:  // pick() never returns it
         case NetworkSimulationMode::Reject:
-            log(request.body() + " -> 503 (simulated: rejected, not stored)");
+            spdlog::warn("Simulated outage: request rejected with 503, not stored");
             reply(http::status::service_unavailable,
                   R"({"status":"ERROR","error":"simulated outage"})");
             break;
@@ -97,21 +119,26 @@ private:
         case NetworkSimulationMode::Timeout:
             // Not stored, never answered. The timer keeps the session (and so
             // the open connection) alive until the client gives up first.
-            log(request.body() + " -> no answer (simulated: timeout, not stored)");
+            spdlog::warn("Simulated timeout: request held open, not stored");
             timer_.expires_after(kSessionTimeout);
             timer_.async_wait([self = shared_from_this()](beast::error_code) {
                 self->close();
             });
             break;
 
-        case NetworkSimulationMode::DropResponseAfterProcessing: {
-            // Store and commit exactly as normal, then hang up instead of
-            // answering: the POS can't tell this from the request being lost.
-            const auto result = handleTransactionRequest(request.body(), store_);
-            log(request.body() + " -> " + result.body + " COMMITTED, response DROPPED (simulated)");
+        case NetworkSimulationMode::DropBeforeProcessing:
+            // The request never reaches the application: nothing stored.
+            spdlog::warn("Simulated drop before processing: connection closed, not stored");
             close();
             break;
-        }
+
+        case NetworkSimulationMode::DropAfterProcessing:
+            // Store and commit exactly as normal, then hang up instead of
+            // answering: the POS can't tell this from the request being lost.
+            (void)handleTransactionRequest(request.body(), store_);
+            spdlog::warn("Simulated drop after processing: COMMITTED, response dropped");
+            close();
+            break;
         }
     }
 
@@ -119,7 +146,6 @@ private:
     {
         const auto& request = parser_.get();
         const auto result = handleTransactionRequest(request.body(), store_);
-        log(request.body() + " -> " + result.body);
         reply(static_cast<http::status>(result.httpStatus), result.body);
     }
 
@@ -143,29 +169,20 @@ private:
         stream_.socket().close(ignored);
     }
 
-    void log(const std::string& line) const
-    {
-        if (logger_) {
-            logger_(line);
-        }
-    }
-
     beast::tcp_stream stream_;
     asio::steady_timer timer_;
     beast::flat_buffer buffer_;
     http::request_parser<http::string_body> parser_;
     http::response<http::string_body> response_;
     ProcessedTransactionStore& store_;
-    const HttpTransactionServer::Logger& logger_;
-    const std::atomic<NetworkSimulationMode>& mode_;
+    ModeSource& modes_;
 };
 
 } // namespace
 
 struct HttpTransactionServer::Impl {
-    Impl(ProcessedTransactionStore& s, const std::string& address, std::uint16_t port, Logger l)
+    Impl(ProcessedTransactionStore& s, const std::string& address, std::uint16_t port)
         : store{s}
-        , logger{std::move(l)}
         , acceptor{ioc, tcp::endpoint{asio::ip::make_address(address), port}}
     {
     }
@@ -176,14 +193,13 @@ struct HttpTransactionServer::Impl {
             if (ec) {
                 return;  // acceptor closed by stop()
             }
-            std::make_shared<Session>(std::move(socket), store, logger, mode)->start();
+            std::make_shared<Session>(std::move(socket), store, modes)->start();
             accept();
         });
     }
 
     ProcessedTransactionStore& store;
-    Logger logger;
-    std::atomic<NetworkSimulationMode> mode{NetworkSimulationMode::Normal};
+    ModeSource modes;
     asio::io_context ioc;
     tcp::acceptor acceptor;
 };
@@ -191,9 +207,8 @@ struct HttpTransactionServer::Impl {
 HttpTransactionServer::HttpTransactionServer(
     ProcessedTransactionStore& store,
     const std::string& address,
-    std::uint16_t port,
-    Logger logger)
-    : impl_{std::make_unique<Impl>(store, address, port, std::move(logger))}
+    std::uint16_t port)
+    : impl_{std::make_unique<Impl>(store, address, port)}
 {
 }
 
@@ -206,12 +221,13 @@ std::uint16_t HttpTransactionServer::port() const noexcept
 
 void HttpTransactionServer::setSimulationMode(NetworkSimulationMode mode) noexcept
 {
-    impl_->mode.store(mode);
+    impl_->modes.mode.store(mode);
+    spdlog::info("Network simulation mode={}", toString(mode));
 }
 
 NetworkSimulationMode HttpTransactionServer::simulationMode() const noexcept
 {
-    return impl_->mode.load();
+    return impl_->modes.mode.load();
 }
 
 void HttpTransactionServer::run(bool handleSignals)

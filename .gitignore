@@ -7,3 +7,4 @@ cmake-build-*/
 compile_commands.json
 data/*.db
 data/*.db-*
+data/*.log

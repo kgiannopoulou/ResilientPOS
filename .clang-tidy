@@ -1,0 +1,15 @@
+# Run by CI on src/ and apps/. Deliberately a focused set: real bug finders,
+# not style opinions.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  clang-analyzer-*,
+  concurrency-*,
+  -concurrency-mt-unsafe,
+  performance-*,
+  -performance-enum-size,
+  misc-redundant-expression,
+  misc-unused-using-decls
+HeaderFilterRegex: 'resilientpos/'

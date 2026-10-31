@@ -23,3 +23,52 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  # The sync worker and the UI thread share the repository: run the whole
+  # suite under ThreadSanitizer, and under Address+UndefinedBehavior sanitizers.
+  sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ["address,undefined", "thread"]
+    runs-on: ubuntu-latest
+    name: sanitizer (${{ matrix.sanitizer }})
+    steps:
+      - uses: actions/checkout@v4
+
+      # TSan cannot map its shadow memory with the runner's high ASLR entropy.
+      - name: Lower ASLR entropy for TSan
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DRESILIENTPOS_SANITIZE=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build --output-on-failure
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
+
+      - name: Build (generates headers/compile database)
+        run: cmake --build build -j 4
+
+      - name: clang-tidy
+        run: |
+          files=$(git ls-files 'src/*.cpp' 'apps/*.cpp')
+          clang-tidy -p build --quiet --warnings-as-errors='*' $files
