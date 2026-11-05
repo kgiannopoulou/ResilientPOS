@@ -18,7 +18,10 @@ namespace resilientpos::network {
 // Never throws for transport problems; they come back as:
 //
 //   refused / unreachable / timed out / dropped  -> NetworkError
-//   HTTP error or unexpected reply              -> ServerError
+//   408, 429, 502, 503, 504                      -> ServerUnavailable
+//   400, 413, 422                                -> Rejected
+//   409                                          -> IdempotencyConflict
+//   any other HTTP error or an unexpected reply  -> ServerError
 //   {"status": "ACCEPTED"}                       -> Accepted
 //   {"status": "ALREADY_PROCESSED"}              -> AlreadyProcessed
 class HttpServerClient final : public ServerClient {

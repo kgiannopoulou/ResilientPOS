@@ -64,9 +64,10 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
         spdlog::info("Transaction synced id={} result={}",
                      shortId, network::toString(lastSendResult_.type));
     } else if (failureClass == network::FailureClass::Permanent) {
+        const auto failure = network::toSyncFailure(lastSendResult_);
         transaction.status = TransactionStatus::DeadLetter;
-        transaction.lastFailure = network::toSyncFailure(lastSendResult_);
-        repository_.recordFailure(transaction.id, transaction.status, *transaction.lastFailure,
+        transaction.lastFailure = failure;
+        repository_.recordFailure(transaction.id, transaction.status, failure,
                                   /*countsAgainstLimit=*/false);
         if (metrics_ != nullptr) {
             metrics_->transactionsDeadLettered.increment();
@@ -74,12 +75,12 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
         spdlog::error("Transaction dead-lettered id={} result={} reason=\"{}\"",
                       shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
     } else {
+        const auto failure = network::toSyncFailure(lastSendResult_);
         const bool countsAgainstLimit = failureClass == network::FailureClass::Transient;
         transaction.status = TransactionStatus::PendingSync;
-        transaction.lastFailure = network::toSyncFailure(lastSendResult_);
+        transaction.lastFailure = failure;
         transaction.failedAttempts = countsAgainstLimit ? 1 : 0;
-        repository_.recordFailure(transaction.id, transaction.status, *transaction.lastFailure,
-                                  countsAgainstLimit);
+        repository_.recordFailure(transaction.id, transaction.status, failure, countsAgainstLimit);
         spdlog::warn("Server unavailable id={} result={} reason=\"{}\"",
                      shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
         spdlog::info("Transaction queued id={} status=PENDING_SYNC", shortId);

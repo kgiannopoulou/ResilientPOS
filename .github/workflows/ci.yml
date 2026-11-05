@@ -24,6 +24,11 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # Exits non-zero unless every sale reached the server exactly once.
+      - name: Multi-terminal simulation
+        shell: bash
+        run: ./build/resilient-sim --terminals 5 --sales 4 --dir sim-data
+
   # The sync worker and the UI thread share the repository: run the whole
   # suite under ThreadSanitizer, and under Address+UndefinedBehavior sanitizers.
   sanitizers:

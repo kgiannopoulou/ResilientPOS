@@ -6,7 +6,8 @@ namespace resilientpos::server {
 
 // What the central server reports:
 //
-//   server_requests_total                POST /transactions received
+//   server_requests_total                requests that reached the handler
+//                                        (not those a simulation mode refused)
 //   server_transactions_accepted_total   stored for the first time
 //   server_transactions_duplicate_total  retries absorbed (ALREADY_PROCESSED)
 //   idempotency_conflicts_total          same ID, different payload (409)
@@ -18,7 +19,7 @@ namespace resilientpos::server {
 // by HttpTransactionServer.
 struct ServerMetrics {
     explicit ServerMetrics(observability::MetricsRegistry& registry)
-        : requests{registry.counter("server_requests_total", "POST /transactions received")}
+        : requests{registry.counter("server_requests_total", "Requests that reached the transaction handler")}
         , accepted{registry.counter("server_transactions_accepted_total", "Transactions stored for the first time")}
         , duplicates{registry.counter("server_transactions_duplicate_total", "Retries absorbed as ALREADY_PROCESSED")}
         , conflicts{registry.counter("idempotency_conflicts_total", "Requests reusing an ID with a different payload")}

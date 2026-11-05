@@ -344,7 +344,7 @@ void printDeadLetter(std::size_t number, const Transaction& tx)
     std::cout << padRight(std::to_string(number), 4) << padRight(shortId(tx.id), 13)
               << padRight(resilientpos::core::formatMoney(tx.amount), 13)
               << padRight(tx.lastFailure ? tx.lastFailure->code : "UNKNOWN", 22)
-              << padRight(std::to_string(tx.syncAttempts), 7)
+              << padRight(std::to_string(tx.syncAttempts), 9)
               << (tx.lastFailure ? formatUtc(tx.lastFailure->at) : "-") << '\n';
     if (tx.lastFailure) {
         std::cout << "    Reason: " << tx.lastFailure->reason << '\n';
@@ -363,8 +363,8 @@ void showDeadLetterQueue(Till& till)
     std::cout << deadLetters.size() << " transaction(s) need attention. They are kept "
                  "locally and are not being retried.\n\n"
               << padRight("#", 4) << padRight("ID", 13) << padRight("AMOUNT", 13)
-              << padRight("FAILURE", 22) << padRight("TRIES", 7) << "LAST FAILURE\n"
-              << std::string(84, '-') << '\n';
+              << padRight("FAILURE", 22) << padRight("RESENDS", 9) << "LAST FAILURE\n"
+              << std::string(86, '-') << '\n';
     for (std::size_t i = 0; i < deadLetters.size(); ++i) {
         printDeadLetter(i + 1, deadLetters[i]);
     }

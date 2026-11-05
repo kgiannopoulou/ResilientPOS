@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <string_view>

@@ -113,6 +113,7 @@ add_library(resilientpos_core
     src/server/NetworkSimulationMode.cpp
     src/server/TransactionHandler.cpp
     src/server/HttpTransactionServer.cpp
+    src/simulation/FleetSimulation.cpp
 )
 target_include_directories(resilientpos_core
     PUBLIC  ${PROJECT_SOURCE_DIR}/include
@@ -135,6 +136,9 @@ target_link_libraries(resilient-pos PRIVATE resilientpos_core resilientpos_warni
 
 add_executable(resilient-server apps/server/main.cpp)
 target_link_libraries(resilient-server PRIVATE resilientpos_core resilientpos_warnings)
+
+add_executable(resilient-sim apps/simulation/main.cpp)
+target_link_libraries(resilient-sim PRIVATE resilientpos_core resilientpos_warnings)
 
 # --- Tests -------------------------------------------------------------------
 if(RESILIENTPOS_BUILD_TESTS)
@@ -165,6 +169,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/DeadLetterTests.cpp
         tests/ConcurrencyTests.cpp
         tests/MetricsTests.cpp
+        tests/FleetSimulationTests.cpp
         tests/IntegrationTests.cpp
     )
     target_include_directories(resilientpos_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)

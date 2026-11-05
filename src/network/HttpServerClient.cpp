@@ -183,6 +183,7 @@ SendResult HttpServerClient::send(const core::Transaction& transaction)
     }
 }
 
+// NOLINTBEGIN(clang-analyzer-cplusplus.Move): same false positive as above.
 std::optional<HttpGetResponse> httpGet(
     const std::string& host,
     std::uint16_t port,
@@ -208,5 +209,6 @@ std::optional<HttpGetResponse> httpGet(
         return std::nullopt;
     }
 }
+// NOLINTEND(clang-analyzer-cplusplus.Move)
 
 } // namespace resilientpos::network
