@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <thread>
+#include <utility>
 
 namespace resilientpos::test {
 
@@ -12,8 +13,9 @@ namespace resilientpos::test {
 // a specific one is given (e.g. to bring back a server that was "down").
 class RunningServer {
 public:
-    explicit RunningServer(server::ProcessedTransactionStore& store, std::uint16_t port = 0)
-        : server_{store, "127.0.0.1", port}
+    explicit RunningServer(server::ProcessedTransactionStore& store, std::uint16_t port = 0,
+                           server::ServerOptions options = {})
+        : server_{store, "127.0.0.1", port, std::move(options)}
         , thread_{[this] { server_.run(); }}
     {
     }

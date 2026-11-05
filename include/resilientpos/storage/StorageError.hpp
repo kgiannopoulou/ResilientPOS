@@ -11,4 +11,11 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// The database stayed locked by other writers for the whole busy timeout.
+// Unlike other storage failures this one is temporary: try again later.
+class StorageBusyError : public StorageError {
+public:
+    using StorageError::StorageError;
+};
+
 } // namespace resilientpos::storage

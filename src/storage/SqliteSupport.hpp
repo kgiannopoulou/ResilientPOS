@@ -7,6 +7,7 @@
 
 #include <sqlite3.h>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -44,7 +45,10 @@ using SqliteHandle = std::unique_ptr<sqlite3, SqliteCloser>;
 
 // Opens (or creates) the database at `path` with the durability settings both
 // sides rely on, then runs `schema`.
-inline SqliteHandle openDatabase(const std::string& path, std::string_view schema)
+inline SqliteHandle openDatabase(
+    const std::string& path,
+    std::string_view schema,
+    std::chrono::milliseconds busyTimeout = std::chrono::seconds{5})
 {
     sqlite3* raw = nullptr;
     const int rc = sqlite3_open_v2(path.c_str(), &raw,
@@ -56,7 +60,7 @@ inline SqliteHandle openDatabase(const std::string& path, std::string_view schem
     }
 
     // Wait briefly instead of failing if another process holds the lock.
-    sqlite3_busy_timeout(db.get(), 5000);
+    sqlite3_busy_timeout(db.get(), static_cast<int>(busyTimeout.count()));
 
     // WAL survives crashes and lets readers run alongside the writer;
     // synchronous=FULL fsyncs every commit so an acknowledged write is on disk.
@@ -103,6 +107,9 @@ public:
         }
         if (rc == SQLITE_DONE) {
             return false;
+        }
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
+            throw StorageBusyError{std::string{"SQLite busy: "} + sqlite3_errmsg(db_)};
         }
         fail(db_, "SQLite step failed");
     }

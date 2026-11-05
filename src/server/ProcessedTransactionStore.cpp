@@ -3,7 +3,9 @@
 #include "resilientpos/util/Sha256.hpp"
 #include "storage/SqliteSupport.hpp"
 
-#include <chrono>
+#include <algorithm>
+#include <condition_variable>
+#include <mutex>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -78,24 +80,85 @@ std::string transactionPayloadHash(std::int64_t amountCents)
                            + std::to_string(amountCents) + '\n');
 }
 
-void ProcessedTransactionStore::Closer::operator()(sqlite3* db) const noexcept
+// A fixed set of connections, each lent to one caller at a time.
+class ProcessedTransactionStore::ConnectionPool {
+public:
+    ConnectionPool(const std::string& path, std::size_t size, std::chrono::milliseconds busyTimeout)
+    {
+        // Every connection to ":memory:" would be its own empty database.
+        const std::size_t count = path == ":memory:" ? 1 : std::max<std::size_t>(size, 1);
+        idle_.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            idle_.push_back(storage::detail::openDatabase(path, kSchema, busyTimeout));
+        }
+        upgradeSchema(idle_.front().get());
+    }
+
+    // Returns its connection to the pool when it goes out of scope.
+    class Lease {
+    public:
+        Lease(ConnectionPool& pool, storage::detail::SqliteHandle connection)
+            : pool_{pool}
+            , connection_{std::move(connection)}
+        {
+        }
+        ~Lease() { pool_.release(std::move(connection_)); }
+
+        Lease(const Lease&) = delete;
+        Lease& operator=(const Lease&) = delete;
+
+        [[nodiscard]]
+        sqlite3* get() const noexcept { return connection_.get(); }
+
+    private:
+        ConnectionPool& pool_;
+        storage::detail::SqliteHandle connection_;
+    };
+
+    [[nodiscard]]
+    Lease acquire()
+    {
+        std::unique_lock lock{mutex_};
+        available_.wait(lock, [this] { return !idle_.empty(); });
+        auto connection = std::move(idle_.back());
+        idle_.pop_back();
+        return Lease{*this, std::move(connection)};
+    }
+
+private:
+    void release(storage::detail::SqliteHandle connection)
+    {
+        {
+            const std::scoped_lock lock{mutex_};
+            idle_.push_back(std::move(connection));
+        }
+        available_.notify_one();
+    }
+
+    std::mutex mutex_;
+    std::condition_variable available_;
+    std::vector<storage::detail::SqliteHandle> idle_;
+};
+
+ProcessedTransactionStore::ProcessedTransactionStore(
+    const std::string& path,
+    std::size_t connections,
+    std::chrono::milliseconds busyTimeout)
+    : pool_{std::make_unique<ConnectionPool>(path, connections, busyTimeout)}
 {
-    sqlite3_close(db);
 }
 
-ProcessedTransactionStore::ProcessedTransactionStore(const std::string& path)
-    : db_{storage::detail::openDatabase(path, kSchema).release()}
-{
-    upgradeSchema(db_.get());
-}
+ProcessedTransactionStore::~ProcessedTransactionStore() = default;
 
 RecordOutcome ProcessedTransactionStore::record(const std::string& id, std::int64_t amountCents)
 {
     const std::string payloadHash = transactionPayloadHash(amountCents);
+    const auto connection = pool_->acquire();
+    sqlite3* db = connection.get();
 
     // "Does it exist? If not, insert" as one atomic statement: there is no
     // window between the check and the write for a second request to slip in.
-    Statement insert{db_.get(),
+    Statement insert{db,
         "INSERT INTO processed_transactions (id, amount_cents, processed_at, payload_hash) "
         "VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO NOTHING"};
     insert.bind(1, id);
@@ -104,14 +167,14 @@ RecordOutcome ProcessedTransactionStore::record(const std::string& id, std::int6
     insert.bind(4, payloadHash);
     insert.step();
 
-    if (sqlite3_changes(db_.get()) == 1) {
+    if (sqlite3_changes(db) == 1) {
         return RecordOutcome::Inserted;
     }
 
     // Lost the insert, so the row exists. Rows are never updated or deleted,
     // which makes reading it back separately safe: whoever won the race, this
     // is the payload the ID stands for, for good.
-    Statement select{db_.get(), "SELECT payload_hash FROM processed_transactions WHERE id = ?1"};
+    Statement select{db, "SELECT payload_hash FROM processed_transactions WHERE id = ?1"};
     select.bind(1, id);
     if (!select.step()) {
         throw storage::StorageError{"Transaction '" + id + "' vanished after a duplicate insert"};
@@ -122,7 +185,8 @@ RecordOutcome ProcessedTransactionStore::record(const std::string& id, std::int6
 
 std::optional<std::int64_t> ProcessedTransactionStore::amountFor(const std::string& id)
 {
-    Statement stmt{db_.get(), "SELECT amount_cents FROM processed_transactions WHERE id = ?1"};
+    const auto connection = pool_->acquire();
+    Statement stmt{connection.get(), "SELECT amount_cents FROM processed_transactions WHERE id = ?1"};
     stmt.bind(1, id);
     if (!stmt.step()) {
         return std::nullopt;
@@ -132,7 +196,8 @@ std::optional<std::int64_t> ProcessedTransactionStore::amountFor(const std::stri
 
 std::size_t ProcessedTransactionStore::count()
 {
-    Statement stmt{db_.get(), "SELECT COUNT(*) FROM processed_transactions"};
+    const auto connection = pool_->acquire();
+    Statement stmt{connection.get(), "SELECT COUNT(*) FROM processed_transactions"};
     stmt.step();
     return static_cast<std::size_t>(stmt.columnInt64(0));
 }

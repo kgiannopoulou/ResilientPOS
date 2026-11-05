@@ -1,5 +1,7 @@
 #include "resilientpos/server/TransactionHandler.hpp"
 
+#include "resilientpos/storage/StorageError.hpp"
+
 #include <boost/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -71,6 +73,10 @@ HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransac
                          "transaction_id was already used with a different payload");
         }
         return reply(500, "ERROR", "unknown record outcome");
+    } catch (const storage::StorageBusyError& e) {
+        // Write contention, not a fault: tells the till to back off and retry
+        // without using up that sale's retry budget.
+        return reply(503, "ERROR", e.what());
     } catch (const std::exception& e) {
         return reply(500, "ERROR", e.what());
     }

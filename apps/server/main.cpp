@@ -27,6 +27,7 @@ using resilientpos::server::kAllNetworkSimulationModes;
 using resilientpos::server::NetworkSimulationMode;
 using resilientpos::server::ProcessedTransactionStore;
 using resilientpos::server::networkSimulationModeFromString;
+using resilientpos::server::ServerOptions;
 
 namespace {
 
@@ -53,6 +54,18 @@ std::uint16_t parsePort(std::string_view text)
         throw std::invalid_argument{"Invalid port: " + std::string{text}};
     }
     return port;
+}
+
+unsigned int parseThreads(std::string_view text)
+{
+    unsigned int threads{};
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, threads);
+    if (ec != std::errc{} || ptr != end || threads == 0 || threads > 256) {
+        throw std::invalid_argument{"--threads must be between 1 and 256: " + std::string{text}};
+    }
+    return threads;
 }
 
 std::string menu()
@@ -101,13 +114,14 @@ void setUpLogging()
 } // namespace
 
 // Usage: resilient-server [--mode normal|latency|random|timeout|drop-before|drop-after|reject|poison]
-//                         [port] [database]
+//                         [--threads N] [port] [database]
 int main(int argc, char* argv[])
 {
     std::cout << "======= ResilientPOS Server ========\n";
 
     try {
         NetworkSimulationMode mode = NetworkSimulationMode::Normal;
+        ServerOptions options;
         std::vector<std::string_view> positional;
         for (int i = 1; i < argc; ++i) {
             const std::string_view arg{argv[i]};
@@ -122,6 +136,11 @@ int main(int argc, char* argv[])
                         + "' (normal, latency, random, timeout, drop-before, drop-after, reject, poison)"};
                 }
                 mode = *parsed;
+            } else if (arg == "--threads") {
+                if (i + 1 >= argc) {
+                    throw std::invalid_argument{"--threads needs a value"};
+                }
+                options.ioThreads = parseThreads(argv[++i]);
             } else {
                 positional.push_back(arg);
             }
@@ -136,13 +155,16 @@ int main(int argc, char* argv[])
             std::filesystem::create_directories(databasePath.parent_path());
         }
         setUpLogging();
-        ProcessedTransactionStore store{databasePath.string()};
+        // One connection per I/O thread: a request never waits for a connection.
+        ProcessedTransactionStore store{databasePath.string(), options.ioThreads};
 
-        HttpTransactionServer server{store, "127.0.0.1", port};
+        const unsigned int ioThreads = options.ioThreads;
+        HttpTransactionServer server{store, "127.0.0.1", port, std::move(options)};
 
         print("Database: " + databasePath.string() + " (" + std::to_string(store.count())
               + " processed)\n"
-              + "Listening on http://127.0.0.1:" + std::to_string(server.port()) + "/transactions\n"
+              + "Listening on http://127.0.0.1:" + std::to_string(server.port()) + "/transactions"
+              + " (" + std::to_string(ioThreads) + " I/O threads)\n"
               + "Press Ctrl+C to stop.\n\n"
               + menu() + describeMode(mode) + '\n');
         server.setSimulationMode(mode);

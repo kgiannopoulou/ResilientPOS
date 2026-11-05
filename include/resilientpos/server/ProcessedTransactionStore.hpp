@@ -1,12 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
-
-struct sqlite3;
 
 namespace resilientpos::server {
 
@@ -34,10 +33,33 @@ std::string transactionPayloadHash(std::int64_t amountCents);
 //
 //   same ID + same hash       -> AlreadyExists (a retry; answer success)
 //   same ID + different hash  -> Conflict      (never accepted, never overwritten)
+//
+// Threading: safe to call from any number of threads. Each call borrows a
+// connection from a small pool for its whole duration, so a connection is never
+// shared (sqlite3_changes(), which decides Inserted vs not, is per connection).
+// Waiting for a free connection blocks; it does not fail.
+//
+// Nothing here serializes writers, on purpose. Two threads can race to insert
+// one ID, and so can two server processes on one file, where no in-process lock
+// could help. What makes that safe is the PRIMARY KEY and the single atomic
+// INSERT ... ON CONFLICT DO NOTHING: exactly one writer wins, in the database.
 class ProcessedTransactionStore {
 public:
-    // Opens (or creates) the database at `path`. ":memory:" for tests.
-    explicit ProcessedTransactionStore(const std::string& path);
+    static constexpr std::size_t kDefaultConnections = 4;
+
+    // Opens (or creates) the database at `path`, with `connections` pooled
+    // connections. ":memory:" for tests: a private database per connection,
+    // so that always uses exactly one. `busyTimeout` is how long a write waits
+    // for the database lock before throwing storage::StorageBusyError.
+    explicit ProcessedTransactionStore(
+        const std::string& path,
+        std::size_t connections = kDefaultConnections,
+        std::chrono::milliseconds busyTimeout = std::chrono::seconds{5}
+    );
+    ~ProcessedTransactionStore();
+
+    ProcessedTransactionStore(const ProcessedTransactionStore&) = delete;
+    ProcessedTransactionStore& operator=(const ProcessedTransactionStore&) = delete;
 
     // Records the transaction if its ID is new. A known ID leaves the stored
     // row untouched; the outcome says whether the payload matched.
@@ -51,11 +73,9 @@ public:
     std::size_t count();
 
 private:
-    struct Closer {
-        void operator()(sqlite3* db) const noexcept;
-    };
+    class ConnectionPool;
 
-    std::unique_ptr<sqlite3, Closer> db_;
+    std::unique_ptr<ConnectionPool> pool_;
 };
 
 } // namespace resilientpos::server

@@ -8,7 +8,7 @@
 namespace resilientpos::server {
 
 struct HandlerResponse {
-    unsigned int httpStatus;  // 200, 400, 409, 422 or 500
+    unsigned int httpStatus;  // 200, 400, 409, 422, 500 or 503
     std::string body;         // JSON
 };
 
@@ -22,11 +22,14 @@ struct HandlerResponse {
 //   bad request                -> 400 {"status": "REJECTED", "error": "..."}
 //   invalid business data      -> 422 {"status": "REJECTED", "error": "..."}
 //   storage error              -> 500 {"status": "ERROR", "error": "..."}
+//   database locked too long   -> 503 {"status": "ERROR", "error": "..."}
 //
 // Both 200 answers mean "the server has it", so a POS may resend the same
 // transaction as often as it likes without it being counted twice. A 409 means
 // the opposite: the server holds a DIFFERENT sale under that ID, and this one
 // was not recorded.
+//
+// Safe to call concurrently: all shared state is in the store.
 [[nodiscard]]
 HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransactionStore& store);
 
