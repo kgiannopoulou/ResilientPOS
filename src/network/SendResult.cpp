@@ -11,10 +11,11 @@ bool SendResult::successful() const noexcept
 std::string_view toString(SendResultType type) noexcept
 {
     switch (type) {
-    case SendResultType::Accepted:         return "ACCEPTED";
-    case SendResultType::AlreadyProcessed: return "ALREADY_PROCESSED";
-    case SendResultType::NetworkError:     return "NETWORK_ERROR";
-    case SendResultType::ServerError:      return "SERVER_ERROR";
+    case SendResultType::Accepted:            return "ACCEPTED";
+    case SendResultType::AlreadyProcessed:    return "ALREADY_PROCESSED";
+    case SendResultType::NetworkError:        return "NETWORK_ERROR";
+    case SendResultType::ServerError:         return "SERVER_ERROR";
+    case SendResultType::IdempotencyConflict: return "IDEMPOTENCY_CONFLICT";
     }
     return "UNKNOWN";
 }

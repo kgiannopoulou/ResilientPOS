@@ -7,10 +7,11 @@ namespace resilientpos::network {
 
 // Outcome of handing one transaction to the server.
 enum class SendResultType {
-    Accepted,          // server stored it for the first time
-    AlreadyProcessed,  // server had it already (e.g. a retry after a lost ACK)
-    NetworkError,      // never reached the server or no reply: retry later
-    ServerError        // server reached but refused/failed: retry later
+    Accepted,            // server stored it for the first time
+    AlreadyProcessed,    // server had it already (e.g. a retry after a lost ACK)
+    NetworkError,        // never reached the server or no reply: retry later
+    ServerError,         // server reached but refused/failed: retry later
+    IdempotencyConflict  // server holds a different sale under this ID: NOT stored
 };
 
 struct SendResult {

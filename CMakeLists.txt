@@ -96,6 +96,7 @@ add_library(resilientpos_core
     src/core/TransactionStatus.cpp
     src/core/Transaction.cpp
     src/util/UuidGenerator.cpp
+    src/util/Sha256.cpp
     src/util/Logging.cpp
     src/storage/SQLiteTransactionRepository.cpp
     src/network/SendResult.cpp
@@ -148,6 +149,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/MoneyTests.cpp
         tests/TransactionStatusTests.cpp
         tests/UuidGeneratorTests.cpp
+        tests/Sha256Tests.cpp
         tests/TransactionTests.cpp
         tests/RepositoryTests.cpp
         tests/SendResultTests.cpp

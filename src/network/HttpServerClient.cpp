@@ -48,6 +48,9 @@ beast::error_code runOperation(asio::io_context& ioc, Start&& start)
 SendResult interpretResponse(const http::response<http::string_body>& response)
 {
     const auto statusCode = response.result_int();
+    if (statusCode == 409) {
+        return {SendResultType::IdempotencyConflict, response.body()};
+    }
     if (statusCode < 200 || statusCode >= 300) {
         return serverError("HTTP " + std::to_string(statusCode) + ": " + response.body());
     }

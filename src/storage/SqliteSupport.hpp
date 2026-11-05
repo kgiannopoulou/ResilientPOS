@@ -138,4 +138,18 @@ private:
     std::unique_ptr<sqlite3_stmt, Finalizer> stmt_;
 };
 
+// True if `table` already has `column`. Schema upgrades use this to stay
+// idempotent: CREATE TABLE IF NOT EXISTS leaves an older table as it was.
+inline bool hasColumn(sqlite3* db, std::string_view table, std::string_view column)
+{
+    Statement stmt{db, "SELECT name FROM pragma_table_info(?1)"};
+    stmt.bind(1, table);
+    while (stmt.step()) {
+        if (stmt.columnText(0) == column) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace resilientpos::storage::detail

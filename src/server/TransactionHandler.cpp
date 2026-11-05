@@ -54,12 +54,20 @@ HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransac
         const std::string transactionId{id->get_string()};
         const auto outcome = store.record(transactionId, amount->get_int64());
         const auto shortId = transactionId.substr(0, 8);
-        if (outcome == RecordOutcome::Inserted) {
+        switch (outcome) {
+        case RecordOutcome::Inserted:
             spdlog::info("Transaction accepted id={} amount={}", shortId, amount->get_int64());
             return reply(200, "ACCEPTED");
+        case RecordOutcome::AlreadyExists:
+            spdlog::info("Duplicate transaction id={} result=ALREADY_PROCESSED (not stored again)", shortId);
+            return reply(200, "ALREADY_PROCESSED");
+        case RecordOutcome::Conflict:
+            spdlog::error("Idempotency conflict id={} amount={} (payload differs from the stored "
+                          "transaction, not stored)", shortId, amount->get_int64());
+            return reply(409, "IDEMPOTENCY_CONFLICT",
+                         "transaction_id was already used with a different payload");
         }
-        spdlog::info("Duplicate transaction id={} result=ALREADY_PROCESSED (not stored again)", shortId);
-        return reply(200, "ALREADY_PROCESSED");
+        return reply(500, "ERROR", "unknown record outcome");
     } catch (const std::exception& e) {
         return reply(500, "ERROR", e.what());
     }

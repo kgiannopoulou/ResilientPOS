@@ -221,6 +221,9 @@ TransactionEvents cliEvents(SyncEngine& syncEngine)
             case SendResultType::NetworkError:
                 std::cout << "[NETWORK] Server unavailable\n";
                 break;
+            case SendResultType::IdempotencyConflict:
+                std::cout << "[SERVER] Conflict: this ID belongs to a different sale\n";
+                break;
             }
 
             // Wire the sale's outcome into the background worker.
@@ -284,6 +287,7 @@ void forceSynchronization(Till& till)
             break;
         case SendResultType::NetworkError:
         case SendResultType::ServerError:
+        case SendResultType::IdempotencyConflict:
             std::cout << "FAILED (" << outcome.message << "), still PENDING_SYNC\n";
             break;
         }

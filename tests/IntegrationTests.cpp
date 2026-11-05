@@ -272,6 +272,22 @@ TEST_CASE("Client gets ACCEPTED, then ALREADY_PROCESSED for the same transaction
     REQUIRE(store.count() == 1);
 }
 
+TEST_CASE("Client reports a reused ID with a different amount as a conflict", "[http][idempotency]")
+{
+    ProcessedTransactionStore serverStore{":memory:"};
+    RunningServer server{serverStore};
+    HttpServerClient client{"127.0.0.1", server.port()};
+    auto tx = Transaction::create(Money{1000});
+    REQUIRE(client.send(tx).type == SendResultType::Accepted);
+
+    tx.amount = Money{10000};
+    const auto result = client.send(tx);
+
+    REQUIRE(result.type == SendResultType::IdempotencyConflict);
+    REQUIRE_FALSE(result.successful());
+    REQUIRE(serverStore.amountFor(tx.id) == 1000);
+}
+
 TEST_CASE("Client reports a stopped server as NetworkError", "[http][offline]")
 {
     HttpServerClient client{"127.0.0.1", closedPort(), 2s};
