@@ -8,7 +8,7 @@
 namespace resilientpos::server {
 
 struct HandlerResponse {
-    unsigned int httpStatus;  // 200, 400, 409 or 500
+    unsigned int httpStatus;  // 200, 400, 409, 422 or 500
     std::string body;         // JSON
 };
 
@@ -20,6 +20,7 @@ struct HandlerResponse {
 //   same ID, same payload      -> 200 {"status": "ALREADY_PROCESSED"}
 //   same ID, different payload -> 409 {"status": "IDEMPOTENCY_CONFLICT", "error": "..."}
 //   bad request                -> 400 {"status": "REJECTED", "error": "..."}
+//   invalid business data      -> 422 {"status": "REJECTED", "error": "..."}
 //   storage error              -> 500 {"status": "ERROR", "error": "..."}
 //
 // Both 200 answers mean "the server has it", so a POS may resend the same

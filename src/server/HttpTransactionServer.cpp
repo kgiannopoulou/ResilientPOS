@@ -116,6 +116,12 @@ private:
                   R"({"status":"ERROR","error":"simulated outage"})");
             break;
 
+        case NetworkSimulationMode::Poison:
+            spdlog::warn("Simulated permanent refusal: request answered with 422, not stored");
+            reply(http::status::unprocessable_entity,
+                  R"({"status":"REJECTED","error":"simulated validation failure"})");
+            break;
+
         case NetworkSimulationMode::Timeout:
             // Not stored, never answered. The timer keeps the session (and so
             // the open connection) alive until the client gives up first.

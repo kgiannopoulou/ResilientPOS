@@ -18,6 +18,7 @@ namespace resilientpos::server {
 //   DropBeforeProcessing  no       no (request read, connection closed)
 //   DropAfterProcessing   yes      no (COMMITTED, then connection closed)
 //   Reject                no       yes, 503
+//   Poison                no       yes, 422 (the sale itself is refused)
 //
 // The two drops look identical to the POS (a NetworkError) but are opposite
 // situations on the server:
@@ -37,7 +38,8 @@ enum class NetworkSimulationMode {
     Timeout,
     DropBeforeProcessing,
     DropAfterProcessing,
-    Reject
+    Reject,
+    Poison
 };
 
 inline constexpr std::array kAllNetworkSimulationModes{
@@ -48,6 +50,7 @@ inline constexpr std::array kAllNetworkSimulationModes{
     NetworkSimulationMode::DropBeforeProcessing,
     NetworkSimulationMode::DropAfterProcessing,
     NetworkSimulationMode::Reject,
+    NetworkSimulationMode::Poison,
 };
 
 inline constexpr std::chrono::milliseconds kSimulatedLatency{500};

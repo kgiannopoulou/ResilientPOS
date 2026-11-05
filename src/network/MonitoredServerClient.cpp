@@ -32,12 +32,14 @@ SendResult MonitoredServerClient::send(const core::Transaction& transaction)
         snapshot_.state = ConnectivityState::Online;
         snapshot_.lastContactAt = std::chrono::system_clock::now();
         break;
+    case SendResultType::Rejected:
     case SendResultType::IdempotencyConflict:
         // The server answered, so the link is fine; this sale is the problem.
         snapshot_.state = ConnectivityState::Online;
         snapshot_.lastContactAt = std::chrono::system_clock::now();
         ++snapshot_.failures;
         break;
+    case SendResultType::ServerUnavailable:
     case SendResultType::ServerError:
         snapshot_.state = ConnectivityState::ServerError;
         snapshot_.lastContactAt = std::chrono::system_clock::now();

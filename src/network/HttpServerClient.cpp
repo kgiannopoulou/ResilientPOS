@@ -48,11 +48,27 @@ beast::error_code runOperation(asio::io_context& ioc, Start&& start)
 SendResult interpretResponse(const http::response<http::string_body>& response)
 {
     const auto statusCode = response.result_int();
-    if (statusCode == 409) {
-        return {SendResultType::IdempotencyConflict, response.body()};
+    const auto detail = "HTTP " + std::to_string(statusCode) + ": " + response.body();
+    switch (statusCode) {
+    case 409:
+        return {SendResultType::IdempotencyConflict, detail};
+    case 400:  // malformed
+    case 413:  // too large
+    case 422:  // well-formed but invalid business data
+        return {SendResultType::Rejected, detail};
+    case 408:
+    case 429:
+    case 502:
+    case 503:
+    case 504:
+        return {SendResultType::ServerUnavailable, detail};
+    default:
+        break;
     }
+    // Anything else (a 500, or a 401/404 from a misconfigured proxy) is not a
+    // verdict on the sale, so it must not dead-letter it on the first try.
     if (statusCode < 200 || statusCode >= 300) {
-        return serverError("HTTP " + std::to_string(statusCode) + ": " + response.body());
+        return serverError(detail);
     }
 
     std::error_code parseError;

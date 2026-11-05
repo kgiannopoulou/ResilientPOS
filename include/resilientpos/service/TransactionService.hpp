@@ -30,10 +30,11 @@ struct TransactionEvents {
 //          |
 //          v
 //   send to server
-//        /   \
-//   success   failure
-//      |         |
-//   SYNCED   PENDING_SYNC  (queued for the sync worker; the till carries on)
+//        /      |        \
+//   success   failure   server refused the sale itself
+//      |        |          |
+//   SYNCED  PENDING_SYNC  DEAD_LETTER  (never retried; the till carries on)
+//           (queued for the sync worker; the till carries on)
 //
 // While the request is in flight the row is CREATED, which the sync worker
 // leaves alone, so the same sale is never sent by both at once. If the till
@@ -50,7 +51,8 @@ public:
         TransactionEvents events = {}
     );
 
-    // Returns the transaction with its final status (SYNCED or PENDING_SYNC).
+    // Returns the transaction with its final status (SYNCED, PENDING_SYNC or
+    // DEAD_LETTER).
     // Throws storage::StorageError if the sale could not be saved locally.
     core::Transaction createTransaction(core::Money amount);
 

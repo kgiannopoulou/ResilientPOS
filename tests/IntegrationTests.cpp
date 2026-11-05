@@ -306,7 +306,7 @@ TEST_CASE("Reject mode answers 503 and stores nothing", "[http][simulation]")
 
     const auto result = client.send(Transaction::create(Money{700}));
 
-    REQUIRE(result.type == SendResultType::ServerError);
+    REQUIRE(result.type == SendResultType::ServerUnavailable);
     REQUIRE(serverStore.count() == 0);
 }
 

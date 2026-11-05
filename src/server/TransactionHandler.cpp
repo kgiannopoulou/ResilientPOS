@@ -49,6 +49,9 @@ HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransac
     if (amount == nullptr || !amount->is_int64()) {
         return reply(400, "REJECTED", "amount_cents must be an integer");
     }
+    if (amount->get_int64() <= 0) {
+        return reply(422, "REJECTED", "amount_cents must be positive");
+    }
 
     try {
         const std::string transactionId{id->get_string()};

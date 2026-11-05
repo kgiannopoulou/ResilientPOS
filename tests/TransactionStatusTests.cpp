@@ -43,14 +43,17 @@ TEST_CASE("TransactionStatus parses back from its string", "[status]")
 TEST_CASE("State machine allows exactly the documented transitions", "[status][state-machine]")
 {
     using enum TransactionStatus;
-    constexpr TransactionStatus all[] = {Created, PendingSync, Syncing, Synced};
+    constexpr TransactionStatus all[] = {Created, PendingSync, Syncing, Synced, DeadLetter};
 
     const auto allowed = [](TransactionStatus from, TransactionStatus to) {
         return (from == Created && to == PendingSync)
             || (from == Created && to == Synced)
+            || (from == Created && to == DeadLetter)
             || (from == PendingSync && to == Syncing)
             || (from == Syncing && to == Synced)
-            || (from == Syncing && to == PendingSync);
+            || (from == Syncing && to == PendingSync)
+            || (from == Syncing && to == DeadLetter)
+            || (from == DeadLetter && to == PendingSync);
     };
 
     for (const auto from : all) {
@@ -70,6 +73,9 @@ TEST_CASE("State machine rejects nonsense transitions", "[status][state-machine]
     REQUIRE_FALSE(canTransition(PendingSync, Synced));  // must be claimed (SYNCING) first
     REQUIRE_FALSE(canTransition(Created, Syncing));     // the worker never takes in-flight sales
     REQUIRE_FALSE(canTransition(PendingSync, PendingSync));
+    REQUIRE_FALSE(canTransition(Synced, DeadLetter));   // the server holds it: nothing to give up on
+    REQUIRE_FALSE(canTransition(DeadLetter, Synced));   // must go back through the queue
+    REQUIRE_FALSE(canTransition(DeadLetter, Syncing));  // only a person requeues a dead letter
 }
 
 TEST_CASE("InvalidTransitionError names both states", "[status][state-machine]")

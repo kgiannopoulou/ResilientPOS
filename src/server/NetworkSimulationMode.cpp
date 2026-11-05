@@ -12,6 +12,7 @@ std::string_view toString(NetworkSimulationMode mode) noexcept
     case NetworkSimulationMode::DropBeforeProcessing: return "drop-before";
     case NetworkSimulationMode::DropAfterProcessing:  return "drop-after";
     case NetworkSimulationMode::Reject:               return "reject";
+    case NetworkSimulationMode::Poison:               return "poison";
     }
     return "unknown";
 }
@@ -26,6 +27,7 @@ std::string_view describe(NetworkSimulationMode mode) noexcept
     case NetworkSimulationMode::DropBeforeProcessing: return "Drop before processing (not stored, no answer)";
     case NetworkSimulationMode::DropAfterProcessing:  return "Drop after processing (stored, no answer)";
     case NetworkSimulationMode::Reject:               return "Reject (503, not stored)";
+    case NetworkSimulationMode::Poison:               return "Poison (422 permanent refusal, not stored)";
     }
     return "Unknown";
 }

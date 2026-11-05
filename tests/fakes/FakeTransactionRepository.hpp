@@ -54,6 +54,16 @@ public:
         return rows;
     }
 
+    std::vector<core::Transaction> findDeadLetters() override
+    {
+        const std::scoped_lock lock{mutex_};
+        auto rows = sortedLocked();
+        std::erase_if(rows, [](const core::Transaction& tx) {
+            return tx.status != core::TransactionStatus::DeadLetter;
+        });
+        return rows;
+    }
+
     void updateStatus(const std::string& id, core::TransactionStatus status) override
     {
         const std::scoped_lock lock{mutex_};
@@ -76,6 +86,31 @@ public:
             return false;
         }
         writeLocked(row, to);
+        return true;
+    }
+
+    void recordFailure(const std::string& id, core::TransactionStatus status,
+                       const core::SyncFailure& failure, bool countsAgainstLimit) override
+    {
+        const std::scoped_lock lock{mutex_};
+        auto& row = existingLocked(id);
+        if (!core::canTransition(row.status, status)) {
+            throw core::InvalidTransitionError{row.status, status};
+        }
+        writeLocked(row, status);
+        row.lastFailure = failure;
+        row.failedAttempts += countsAgainstLimit ? 1 : 0;
+    }
+
+    bool requeueDeadLetter(const std::string& id) override
+    {
+        const std::scoped_lock lock{mutex_};
+        auto& row = existingLocked(id);
+        if (row.status != core::TransactionStatus::DeadLetter) {
+            return false;
+        }
+        row.status = core::TransactionStatus::PendingSync;
+        row.failedAttempts = 0;
         return true;
     }
 

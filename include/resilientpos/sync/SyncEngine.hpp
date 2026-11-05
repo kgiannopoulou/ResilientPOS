@@ -22,6 +22,7 @@ struct SyncOutcome {
     std::string transactionId;
     network::SendResultType result;
     std::string message;
+    bool deadLettered{false};  // this attempt moved it to DEAD_LETTER
 };
 
 // What one syncPendingTransactions() pass achieved.
@@ -30,6 +31,7 @@ struct SyncReport {
     std::size_t synced{0};            // includes alreadyProcessed
     std::size_t alreadyProcessed{0};  // server had it: a resend after a lost reply
     std::size_t failed{0};            // left PENDING_SYNC for the next pass
+    std::size_t deadLettered{0};      // gave up on these: moved to DEAD_LETTER
     std::size_t stillPending{0};      // PENDING_SYNC/SYNCING rows after the pass
     std::vector<SyncOutcome> outcomes;  // one per attempted transaction, in order
 };
@@ -40,6 +42,16 @@ struct WorkerStatus {
     unsigned int consecutiveFailures{0};
     // Set while the worker is backing off after a failed pass.
     std::optional<std::chrono::steady_clock::time_point> nextRetryAt;
+};
+
+// How many failures the server attributes to one sale before it is given up on.
+// With the default backoff, ten attempts span a few minutes, enough for a real
+// server fault to clear. Only FailureClass::Transient results count, so this
+// never fires during an outage; see network::classify().
+inline constexpr unsigned int kDefaultMaxFailedAttempts = 10;
+
+struct SyncOptions {
+    unsigned int maxFailedAttempts{kDefaultMaxFailedAttempts};
 };
 
 // Drains the offline queue:
@@ -56,17 +68,22 @@ struct WorkerStatus {
 //   claim: PENDING_SYNC -> SYNCING    (compare-and-set; skip if someone else has it)
 //          |
 //   serverClient.send()
-//        /        \
-//   success      failure
-//      |            |
-//   SYNCED     PENDING_SYNC
+//        /        |          \
+//   success    retryable    permanent, or retry limit reached
+//      |          |            |
+//   SYNCED   PENDING_SYNC   DEAD_LETTER
 //
 // "Success" includes ALREADY_PROCESSED: the server stored the sale on an
 // earlier attempt whose reply was lost, so resending is how it becomes SYNCED.
 //
-// A NetworkError ends the pass early: if the server is unreachable for one
-// sale it is unreachable for all of them, and each attempt can take seconds.
-// A ServerError is about that one request, so the pass carries on.
+// A NetworkError or ServerUnavailable ends the pass early: if the server is
+// unreachable for one sale it is unreachable for all of them, and each attempt
+// can take seconds. Any other failure is about that one request, so the pass
+// carries on: one poison sale cannot hold up the queue behind it.
+//
+// A dead-lettered sale is not retried and does not count as a failed pass (the
+// server is fine, the sale is not), so it triggers no backoff. It stays on disk
+// with its failure details until retryDeadLetter() puts it back in the queue.
 //
 // Two ways to drive it:
 //
@@ -97,7 +114,8 @@ public:
     SyncEngine(
         storage::TransactionRepository& repository,
         network::ServerClient& serverClient,
-        RetryPolicy retryPolicy = RetryPolicy{}
+        RetryPolicy retryPolicy = RetryPolicy{},
+        SyncOptions options = {}
     );
     ~SyncEngine();
 
@@ -124,6 +142,17 @@ public:
     // evidently over. Used when a live sale goes through while sales queue.
     void notifyServerReachable();
 
+    // Everything currently given up on, for manual inspection.
+    [[nodiscard]]
+    std::vector<core::Transaction> deadLetters();
+
+    // Manual retry: back into the queue with a fresh retry budget, and wakes
+    // the worker. False if `id` is not in DEAD_LETTER.
+    bool retryDeadLetter(const std::string& id);
+
+    // retryDeadLetter() for every dead letter; returns how many were requeued.
+    std::size_t retryAllDeadLetters();
+
     [[nodiscard]]
     WorkerStatus workerStatus() const;
 
@@ -133,6 +162,7 @@ private:
     storage::TransactionRepository& repository_;
     network::ServerClient& serverClient_;
     RetryPolicy retryPolicy_;
+    SyncOptions options_;
 
     std::mutex passMutex_;  // one pass at a time
 

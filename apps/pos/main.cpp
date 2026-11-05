@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -35,6 +36,7 @@
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
 using resilientpos::core::TransactionStatus;
+using resilientpos::network::FailureClass;
 using resilientpos::network::HttpServerClient;
 using resilientpos::network::MonitoredServerClient;
 using resilientpos::network::SendResult;
@@ -153,12 +155,14 @@ void showMainScreen(Till& till)
               << "              ResilientPOS\n"
               << kBanner << "\n\n"
               << "Network: " << resilientpos::network::toString(connectivity.state) << '\n'
-              << "Pending transactions: " << till.repository.findPending().size() << "\n\n"
+              << "Pending transactions: " << till.repository.findPending().size() << '\n'
+              << "Dead letters: " << till.repository.findDeadLetters().size() << "\n\n"
               << "1. New transaction\n"
               << "2. List transactions\n"
               << "3. Force synchronization\n"
               << "4. Network status\n"
-              << "5. Exit\n\n";
+              << "5. Dead letter queue\n"
+              << "6. Exit\n\n";
 }
 
 void newTransaction(Till& till)
@@ -196,6 +200,9 @@ void newTransaction(Till& till)
     if (transaction.status == TransactionStatus::PendingSync) {
         std::cout << "\nTransaction safely stored locally.\n"
                      "POS can continue operating.\n";
+    } else if (transaction.status == TransactionStatus::DeadLetter) {
+        std::cout << "\nThe server refused this sale, so it will not be retried.\n"
+                     "It is kept locally: see 5. Dead letter queue.\n";
     }
 }
 
@@ -218,6 +225,12 @@ TransactionEvents cliEvents(SyncEngine& syncEngine)
             case SendResultType::ServerError:
                 std::cout << "[SERVER] Error: " << result.message << '\n';
                 break;
+            case SendResultType::ServerUnavailable:
+                std::cout << "[SERVER] Temporarily unavailable\n";
+                break;
+            case SendResultType::Rejected:
+                std::cout << "[SERVER] Rejected: " << result.message << '\n';
+                break;
             case SendResultType::NetworkError:
                 std::cout << "[NETWORK] Server unavailable\n";
                 break;
@@ -226,8 +239,10 @@ TransactionEvents cliEvents(SyncEngine& syncEngine)
                 break;
             }
 
-            // Wire the sale's outcome into the background worker.
-            if (result.successful()) {
+            // Wire the sale's outcome into the background worker. A refusal is
+            // still an answer: the server is evidently up.
+            const auto failureClass = resilientpos::network::classify(result.type);
+            if (failureClass == FailureClass::None || failureClass == FailureClass::Permanent) {
                 syncEngine.notifyServerReachable();
             } else {
                 syncEngine.notifyPendingTransaction();
@@ -249,6 +264,7 @@ void listTransactions(TransactionRepository& repository)
               << padRight("TRIES", 7) << "CREATED\n"
               << std::string(72, '-') << '\n';
     std::size_t pending = 0;
+    std::size_t deadLetters = 0;
     Money pendingTotal{0};
     for (std::size_t i = first; i < all.size(); ++i) {
         const auto& tx = all[i];
@@ -259,7 +275,9 @@ void listTransactions(TransactionRepository& repository)
                   << formatUtc(tx.createdAt) << '\n';
     }
     for (const auto& tx : all) {
-        if (tx.status != TransactionStatus::Synced) {
+        if (tx.status == TransactionStatus::DeadLetter) {
+            ++deadLetters;
+        } else if (tx.status != TransactionStatus::Synced) {
             ++pending;
             pendingTotal += tx.amount;
         }
@@ -268,7 +286,8 @@ void listTransactions(TransactionRepository& repository)
         std::cout << "(showing the latest " << kListLimit << " of " << all.size() << ")\n";
     }
     std::cout << "\nTotal transactions: " << all.size() << '\n'
-              << "Waiting to sync:    " << pending << " (" << pendingTotal << ")\n";
+              << "Waiting to sync:    " << pending << " (" << pendingTotal << ")\n"
+              << "Dead letters:       " << deadLetters << '\n';
 }
 
 void forceSynchronization(Till& till)
@@ -278,6 +297,10 @@ void forceSynchronization(Till& till)
 
     for (const auto& outcome : report.outcomes) {
         std::cout << "[SYNC] " << shortId(outcome.transactionId) << " -> ";
+        if (outcome.deadLettered) {
+            std::cout << "DEAD_LETTER (" << outcome.message << ")\n";
+            continue;
+        }
         switch (outcome.result) {
         case SendResultType::Accepted:
             std::cout << "SYNCED\n";
@@ -286,7 +309,9 @@ void forceSynchronization(Till& till)
             std::cout << "ALREADY_PROCESSED -> SYNCED (server had it; no duplicate)\n";
             break;
         case SendResultType::NetworkError:
+        case SendResultType::ServerUnavailable:
         case SendResultType::ServerError:
+        case SendResultType::Rejected:
         case SendResultType::IdempotencyConflict:
             std::cout << "FAILED (" << outcome.message << "), still PENDING_SYNC\n";
             break;
@@ -297,6 +322,62 @@ void forceSynchronization(Till& till)
     }
     std::cout << report.synced << " transaction(s) synchronized.\n"
               << report.stillPending << " transaction(s) pending.\n";
+    if (report.deadLettered > 0) {
+        std::cout << report.deadLettered << " transaction(s) moved to the dead letter queue.\n";
+    }
+}
+
+void printDeadLetter(std::size_t number, const Transaction& tx)
+{
+    std::cout << padRight(std::to_string(number), 4) << padRight(shortId(tx.id), 13)
+              << padRight(resilientpos::core::formatMoney(tx.amount), 13)
+              << padRight(tx.lastFailure ? tx.lastFailure->code : "UNKNOWN", 22)
+              << padRight(std::to_string(tx.syncAttempts), 7)
+              << (tx.lastFailure ? formatUtc(tx.lastFailure->at) : "-") << '\n';
+    if (tx.lastFailure) {
+        std::cout << "    Reason: " << tx.lastFailure->reason << '\n';
+    }
+}
+
+// Inspect what was given up on, then requeue one, all, or none of it.
+void showDeadLetterQueue(Till& till)
+{
+    const auto deadLetters = till.syncEngine.deadLetters();
+    if (deadLetters.empty()) {
+        std::cout << "The dead letter queue is empty.\n";
+        return;
+    }
+
+    std::cout << deadLetters.size() << " transaction(s) need attention. They are kept "
+                 "locally and are not being retried.\n\n"
+              << padRight("#", 4) << padRight("ID", 13) << padRight("AMOUNT", 13)
+              << padRight("FAILURE", 22) << padRight("TRIES", 7) << "LAST FAILURE\n"
+              << std::string(84, '-') << '\n';
+    for (std::size_t i = 0; i < deadLetters.size(); ++i) {
+        printDeadLetter(i + 1, deadLetters[i]);
+    }
+
+    const auto choice = readLine("\nNumber to retry, 'a' to retry all, Enter to go back: ");
+    if (!choice || choice->empty()) {
+        return;
+    }
+    if (*choice == "a") {
+        std::cout << till.syncEngine.retryAllDeadLetters() << " transaction(s) requeued.\n";
+        return;
+    }
+
+    std::size_t number{};
+    const auto* begin = choice->data();
+    const auto* end = begin + choice->size();
+    const auto [ptr, ec] = std::from_chars(begin, end, number);
+    if (ec != std::errc{} || ptr != end || number < 1 || number > deadLetters.size()) {
+        std::cout << "No dead letter number '" << *choice << "'.\n";
+        return;
+    }
+    const auto& transaction = deadLetters[number - 1];
+    if (till.syncEngine.retryDeadLetter(transaction.id)) {
+        std::cout << shortId(transaction.id) << " requeued as PENDING_SYNC.\n";
+    }
 }
 
 void showNetworkStatus(Till& till)
@@ -380,7 +461,7 @@ int main(int argc, char* argv[])
         while (true) {
             showMainScreen(till);
             const auto choice = readLine("> ");
-            if (!choice || *choice == "5") {
+            if (!choice || *choice == "6") {
                 break;
             }
             if (choice->empty()) {
@@ -397,6 +478,8 @@ int main(int argc, char* argv[])
                     forceSynchronization(till);
                 } else if (*choice == "4") {
                     showNetworkStatus(till);
+                } else if (*choice == "5") {
+                    showDeadLetterQueue(till);
                 } else {
                     std::cout << "Unknown option '" << *choice << "'.\n";
                 }

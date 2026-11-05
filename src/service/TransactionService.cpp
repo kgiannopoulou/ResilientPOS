@@ -45,14 +45,26 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
     // If this update fails after the server accepted, the row stays CREATED,
     // is requeued on restart and the resend gets ALREADY_PROCESSED: still no
     // duplicate.
-    transaction.status = lastSendResult_.successful() ? TransactionStatus::Synced
-                                                      : TransactionStatus::PendingSync;
-    repository_.updateStatus(transaction.id, transaction.status);
-
+    const auto failureClass = network::classify(lastSendResult_.type);
     if (lastSendResult_.successful()) {
+        transaction.status = TransactionStatus::Synced;
+        repository_.updateStatus(transaction.id, transaction.status);
         spdlog::info("Transaction synced id={} result={}",
                      shortId, network::toString(lastSendResult_.type));
+    } else if (failureClass == network::FailureClass::Permanent) {
+        transaction.status = TransactionStatus::DeadLetter;
+        transaction.lastFailure = network::toSyncFailure(lastSendResult_);
+        repository_.recordFailure(transaction.id, transaction.status, *transaction.lastFailure,
+                                  /*countsAgainstLimit=*/false);
+        spdlog::error("Transaction dead-lettered id={} result={} reason=\"{}\"",
+                      shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
     } else {
+        const bool countsAgainstLimit = failureClass == network::FailureClass::Transient;
+        transaction.status = TransactionStatus::PendingSync;
+        transaction.lastFailure = network::toSyncFailure(lastSendResult_);
+        transaction.failedAttempts = countsAgainstLimit ? 1 : 0;
+        repository_.recordFailure(transaction.id, transaction.status, *transaction.lastFailure,
+                                  countsAgainstLimit);
         spdlog::warn("Server unavailable id={} result={} reason=\"{}\"",
                      shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
         spdlog::info("Transaction queued id={} status=PENDING_SYNC", shortId);

@@ -100,7 +100,7 @@ void setUpLogging()
 
 } // namespace
 
-// Usage: resilient-server [--mode normal|latency|random|timeout|drop-before|drop-after|reject]
+// Usage: resilient-server [--mode normal|latency|random|timeout|drop-before|drop-after|reject|poison]
 //                         [port] [database]
 int main(int argc, char* argv[])
 {
@@ -119,7 +119,7 @@ int main(int argc, char* argv[])
                 if (!parsed) {
                     throw std::invalid_argument{
                         "Unknown mode '" + std::string{argv[i]}
-                        + "' (normal, latency, random, timeout, drop-before, drop-after, reject)"};
+                        + "' (normal, latency, random, timeout, drop-before, drop-after, reject, poison)"};
                 }
                 mode = *parsed;
             } else {

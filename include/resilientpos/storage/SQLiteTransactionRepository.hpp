@@ -40,6 +40,10 @@ public:
     std::vector<core::Transaction>
     findPending() override;
 
+    [[nodiscard]]
+    std::vector<core::Transaction>
+    findDeadLetters() override;
+
     void updateStatus(
         const std::string& id,
         core::TransactionStatus status
@@ -50,6 +54,15 @@ public:
         core::TransactionStatus expected,
         core::TransactionStatus to
     ) override;
+
+    void recordFailure(
+        const std::string& id,
+        core::TransactionStatus status,
+        const core::SyncFailure& failure,
+        bool countsAgainstLimit
+    ) override;
+
+    bool requeueDeadLetter(const std::string& id) override;
 
     std::size_t recoverInterrupted() override;
 

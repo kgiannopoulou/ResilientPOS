@@ -10,10 +10,11 @@ bool canTransition(TransactionStatus from, TransactionStatus to) noexcept
 {
     using enum TransactionStatus;
     switch (from) {
-    case Created:     return to == PendingSync || to == Synced;
+    case Created:     return to == PendingSync || to == Synced || to == DeadLetter;
     case PendingSync: return to == Syncing;
-    case Syncing:     return to == Synced || to == PendingSync;
+    case Syncing:     return to == Synced || to == PendingSync || to == DeadLetter;
     case Synced:      return false;
+    case DeadLetter:  return to == PendingSync;  // manual retry only
     }
     return false;
 }
@@ -33,6 +34,7 @@ std::string_view toString(TransactionStatus status) noexcept
     case TransactionStatus::PendingSync: return "PENDING_SYNC";
     case TransactionStatus::Syncing:     return "SYNCING";
     case TransactionStatus::Synced:      return "SYNCED";
+    case TransactionStatus::DeadLetter:  return "DEAD_LETTER";
     }
     // Only reachable if someone casts an out-of-range integer to the enum.
     return "UNKNOWN";
@@ -45,6 +47,7 @@ std::optional<TransactionStatus> transactionStatusFromString(std::string_view te
         TransactionStatus::PendingSync,
         TransactionStatus::Syncing,
         TransactionStatus::Synced,
+        TransactionStatus::DeadLetter,
     };
     for (const auto status : all) {
         if (toString(status) == text) {

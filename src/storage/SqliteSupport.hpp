@@ -92,6 +92,8 @@ public:
         check(sqlite3_bind_int64(stmt_.get(), index, value));
     }
 
+    void bindNull(int index) { check(sqlite3_bind_null(stmt_.get(), index)); }
+
     // Advances the statement; true while it yields rows, false when done.
     bool step()
     {
@@ -109,6 +111,12 @@ public:
     std::int64_t columnInt64(int column) const
     {
         return sqlite3_column_int64(stmt_.get(), column);
+    }
+
+    [[nodiscard]]
+    bool columnIsNull(int column) const
+    {
+        return sqlite3_column_type(stmt_.get(), column) == SQLITE_NULL;
     }
 
     [[nodiscard]]

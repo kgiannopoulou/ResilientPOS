@@ -3,11 +3,14 @@
 #include <spdlog/spdlog.h>
 
 #include <exception>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace resilientpos::sync {
 
 using core::TransactionStatus;
+using network::FailureClass;
 using network::SendResult;
 using network::SendResultType;
 
@@ -24,11 +27,16 @@ std::string shortId(const std::string& id)
 SyncEngine::SyncEngine(
     storage::TransactionRepository& repository,
     network::ServerClient& serverClient,
-    RetryPolicy retryPolicy)
+    RetryPolicy retryPolicy,
+    SyncOptions options)
     : repository_{repository}
     , serverClient_{serverClient}
-    , retryPolicy_{retryPolicy}
+    , retryPolicy_{std::move(retryPolicy)}
+    , options_{options}
 {
+    if (options_.maxFailedAttempts == 0) {
+        throw std::invalid_argument{"SyncOptions::maxFailedAttempts must be at least 1"};
+    }
     if (const auto recovered = repository_.recoverInterrupted(); recovered > 0) {
         spdlog::warn("Recovered interrupted transactions count={} status=PENDING_SYNC", recovered);
     }
@@ -66,9 +74,8 @@ SyncReport SyncEngine::syncPendingTransactions()
             // ServerClient should report, not throw; if it does, retry later.
             result = SendResult{SendResultType::NetworkError, e.what()};
         }
-        report.outcomes.push_back({transaction.id, result.type, result.message});
-
         if (result.successful()) {
+            report.outcomes.push_back({transaction.id, result.type, result.message, false});
             repository_.updateStatus(transaction.id, TransactionStatus::Synced);
             ++report.synced;
             if (result.type == SendResultType::AlreadyProcessed) {
@@ -79,12 +86,32 @@ SyncReport SyncEngine::syncPendingTransactions()
             continue;
         }
 
-        repository_.updateStatus(transaction.id, TransactionStatus::PendingSync);
+        const FailureClass failureClass = network::classify(result.type);
+        const bool countsAgainstLimit = failureClass == FailureClass::Transient;
+        const bool limitReached = countsAgainstLimit
+            && transaction.failedAttempts + 1 >= options_.maxFailedAttempts;
+        const bool giveUp = failureClass == FailureClass::Permanent || limitReached;
+
+        repository_.recordFailure(
+            transaction.id,
+            giveUp ? TransactionStatus::DeadLetter : TransactionStatus::PendingSync,
+            network::toSyncFailure(result),
+            countsAgainstLimit);
+        report.outcomes.push_back({transaction.id, result.type, result.message, giveUp});
+
+        if (giveUp) {
+            ++report.deadLettered;
+            spdlog::error("Transaction dead-lettered id={} result={} attempts={} reason=\"{}\"",
+                          shortId(transaction.id), network::toString(result.type),
+                          transaction.syncAttempts + 1, result.message);
+            continue;
+        }
+
         ++report.failed;
         spdlog::warn("Transaction sync failed id={} result={} reason=\"{}\"",
                      shortId(transaction.id), network::toString(result.type), result.message);
 
-        if (result.type == SendResultType::NetworkError) {
+        if (failureClass == FailureClass::Unreachable) {
             spdlog::warn("Server unreachable, ending sync pass early");
             break;
         }
@@ -92,8 +119,10 @@ SyncReport SyncEngine::syncPendingTransactions()
 
     report.stillPending = repository_.findPending().size();
     if (report.attempted > 0) {
-        spdlog::info("Sync pass finished synced={} already_processed={} failed={} pending={}",
-                     report.synced, report.alreadyProcessed, report.failed, report.stillPending);
+        spdlog::info("Sync pass finished synced={} already_processed={} failed={} "
+                     "dead_lettered={} pending={}",
+                     report.synced, report.alreadyProcessed, report.failed,
+                     report.deadLettered, report.stillPending);
     }
     return report;
 }
@@ -139,6 +168,36 @@ void SyncEngine::notifyServerReachable()
         reachableSignalled_ = true;
     }
     wakeUp_.notify_all();
+}
+
+std::vector<core::Transaction> SyncEngine::deadLetters()
+{
+    return repository_.findDeadLetters();
+}
+
+bool SyncEngine::retryDeadLetter(const std::string& id)
+{
+    if (!repository_.requeueDeadLetter(id)) {
+        return false;
+    }
+    spdlog::info("Dead letter requeued id={} status=PENDING_SYNC", shortId(id));
+    notifyPendingTransaction();
+    return true;
+}
+
+std::size_t SyncEngine::retryAllDeadLetters()
+{
+    std::size_t requeued = 0;
+    for (const auto& transaction : repository_.findDeadLetters()) {
+        if (repository_.requeueDeadLetter(transaction.id)) {
+            ++requeued;
+        }
+    }
+    if (requeued > 0) {
+        spdlog::info("Dead letters requeued count={} status=PENDING_SYNC", requeued);
+        notifyPendingTransaction();
+    }
+    return requeued;
 }
 
 WorkerStatus SyncEngine::workerStatus() const

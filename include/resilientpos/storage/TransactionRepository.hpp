@@ -40,6 +40,11 @@ public:
     virtual std::vector<core::Transaction>
     findPending() = 0;
 
+    // Transactions in DEAD_LETTER, oldest first, with their failure details.
+    [[nodiscard]]
+    virtual std::vector<core::Transaction>
+    findDeadLetters() = 0;
+
     // Moves a transaction to `status`. Throws StorageError if the ID is unknown
     // and core::InvalidTransitionError if the state machine forbids the move.
     virtual void updateStatus(
@@ -58,10 +63,27 @@ public:
         core::TransactionStatus to
     ) = 0;
 
+    // A failed send, in one atomic write: moves the transaction to `status`
+    // (PENDING_SYNC or DEAD_LETTER) and records why. `countsAgainstLimit` adds
+    // one to failedAttempts. Throws like updateStatus().
+    virtual void recordFailure(
+        const std::string& id,
+        core::TransactionStatus status,
+        const core::SyncFailure& failure,
+        bool countsAgainstLimit
+    ) = 0;
+
+    // Manual retry: moves a DEAD_LETTER transaction back to PENDING_SYNC with a
+    // fresh retry budget (failedAttempts = 0). The failure details stay as a
+    // record of what happened. False if it is not in DEAD_LETTER; throws
+    // StorageError for an unknown ID.
+    virtual bool requeueDeadLetter(const std::string& id) = 0;
+
     // Crash recovery, called once at startup: a CREATED or SYNCING row on disk
     // was in flight when the previous run died, so whether the server got it
     // is unknown. Moves every such row back to PENDING_SYNC so it is resent
     // (the server's idempotency makes that safe). Returns how many it moved.
+    // DEAD_LETTER rows are not in flight and stay where they are.
     virtual std::size_t recoverInterrupted() = 0;
 };
 

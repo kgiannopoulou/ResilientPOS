@@ -10,14 +10,19 @@ namespace resilientpos::core {
 // Lifecycle of a sale on the till. Only these transitions are legal:
 //
 //   CREATED ──────────────────────────────► SYNCED      first send accepted
-//      │                                      ▲
-//      ▼                                      │
-//   PENDING_SYNC ──► SYNCING ─────────────────┘         resend accepted
-//         ▲             │
-//         └─────────────┘                               resend failed
+//      │  │                                   ▲
+//      │  └─────────────────────┐             │
+//      ▼                        │             │
+//   PENDING_SYNC ──► SYNCING ───┼─────────────┘         resend accepted
+//      ▲  ▲             │  │    │
+//      │  └─────────────┘  │    │                       resend failed, will retry
+//      │                   ▼    ▼
+//      └──────────── DEAD_LETTER                        gave up; operator may requeue
 //
-//   CREATED  the TransactionService is sending it right now
-//   SYNCING  the SyncEngine is resending it right now
+//   CREATED      the TransactionService is sending it right now
+//   SYNCING      the SyncEngine is resending it right now
+//   DEAD_LETTER  retrying cannot help: kept on disk, out of the queue, until a
+//                person has looked at it. The sale is never deleted.
 //
 // A CREATED or SYNCING row found on disk at startup belongs to a run that died
 // mid-send; it is returned to PENDING_SYNC (both legal moves) and resent.
@@ -26,7 +31,8 @@ enum class TransactionStatus {
     Created,
     PendingSync,
     Syncing,
-    Synced
+    Synced,
+    DeadLetter
 };
 
 // True if a transaction may move from `from` to `to` (see the diagram above).

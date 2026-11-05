@@ -158,6 +158,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/RetryPolicyTests.cpp
         tests/SyncEngineTests.cpp
         tests/SyncWorkerTests.cpp
+        tests/DeadLetterTests.cpp
         tests/IntegrationTests.cpp
     )
     target_include_directories(resilientpos_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
