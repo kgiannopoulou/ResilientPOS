@@ -1,5 +1,6 @@
 #pragma once
 
+#include "resilientpos/observability/Metrics.hpp"
 #include "resilientpos/server/NetworkSimulationMode.hpp"
 #include "resilientpos/server/ProcessedTransactionStore.hpp"
 
@@ -13,6 +14,9 @@ namespace resilientpos::server {
 struct ServerOptions {
     // Threads running the io_context; run() uses the caller's plus ioThreads - 1.
     unsigned int ioThreads{4};
+    // Where to report. Leave null for a private registry; pass one to keep the
+    // numbers across a server restart within a process. Must outlive the server.
+    observability::MetricsRegistry* metrics{nullptr};
     // Called on the I/O thread just before a request reaches the store. A seam
     // for tests to prove requests are really in flight at the same time.
     std::function<void()> beforeProcess;
@@ -20,8 +24,12 @@ struct ServerOptions {
 
 // Minimal HTTP/1.1 front end for the central server (Boost.Beast on Asio).
 //
-//   POST /transactions   -> handleTransactionRequest()
-//   anything else        -> 404 / 405
+//   POST /transactions          -> handleTransactionRequest()
+//   GET  /health /ready /metrics -> observability::handleOpsRequest()
+//   anything else               -> 404 / 405
+//
+// The operational endpoints ignore the simulation mode: a monitoring system has
+// to be able to see an outage, including a simulated one.
 //
 // Concurrency model:
 //
@@ -70,6 +78,10 @@ public:
 
     [[nodiscard]]
     NetworkSimulationMode simulationMode() const noexcept;
+
+    // What GET /metrics answers.
+    [[nodiscard]]
+    std::string renderMetrics() const;
 
     // Serves requests until stop() is called (or SIGINT/SIGTERM if
     // handleSignals was requested). Blocks the calling thread, which becomes

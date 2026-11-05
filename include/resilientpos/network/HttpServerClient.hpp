@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace resilientpos::network {
@@ -35,5 +36,22 @@ private:
     std::uint16_t port_;
     std::chrono::milliseconds timeout_;
 };
+
+// The outcome of a plain GET. For reading /metrics, /health and /ready from
+// tests and the fleet simulation; a till never needs it to sell.
+struct HttpGetResponse {
+    unsigned int status;
+    std::string contentType;
+    std::string body;
+};
+
+// Fetches `target` from host:port; nullopt if no response arrived in time.
+[[nodiscard]]
+std::optional<HttpGetResponse> httpGet(
+    const std::string& host,
+    std::uint16_t port,
+    const std::string& target,
+    std::chrono::milliseconds timeout = std::chrono::seconds{3}
+);
 
 } // namespace resilientpos::network

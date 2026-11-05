@@ -2,6 +2,7 @@
 
 #include "resilientpos/network/SendResult.hpp"
 #include "resilientpos/network/ServerClient.hpp"
+#include "resilientpos/observability/PosMetrics.hpp"
 #include "resilientpos/storage/TransactionRepository.hpp"
 #include "resilientpos/sync/RetryPolicy.hpp"
 
@@ -52,6 +53,7 @@ inline constexpr unsigned int kDefaultMaxFailedAttempts = 10;
 
 struct SyncOptions {
     unsigned int maxFailedAttempts{kDefaultMaxFailedAttempts};
+    observability::PosMetrics* metrics{nullptr};  // optional; must outlive the engine
 };
 
 // Drains the offline queue:

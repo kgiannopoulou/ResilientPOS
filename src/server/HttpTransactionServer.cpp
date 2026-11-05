@@ -1,5 +1,7 @@
 #include "resilientpos/server/HttpTransactionServer.hpp"
 
+#include "resilientpos/observability/OpsEndpoints.hpp"
+#include "resilientpos/server/ServerMetrics.hpp"
 #include "resilientpos/server/TransactionHandler.hpp"
 
 #include <boost/asio.hpp>
@@ -13,6 +15,8 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -59,12 +63,15 @@ struct ModeSource {
 class Session : public std::enable_shared_from_this<Session> {
 public:
     Session(tcp::socket socket, ProcessedTransactionStore& store, ModeSource& modes,
-            const ServerOptions& options)
+            const ServerOptions& options, ServerMetrics& metrics,
+            const observability::OpsEndpoints& ops)
         : stream_{std::move(socket)}
         , timer_{stream_.get_executor()}
         , store_{store}
         , modes_{modes}
         , options_{options}
+        , metrics_{metrics}
+        , ops_{ops}
     {
         parser_.body_limit(kMaxBodyBytes);
     }
@@ -99,6 +106,19 @@ private:
         response_.keep_alive(false);
         response_.set(http::field::server, "ResilientPOS-Server");
         response_.set(http::field::content_type, "application/json");
+
+        const auto method = request.method_string();
+        const auto target = request.target();
+        if (auto ops = observability::handleOpsRequest(
+                std::string_view{method.data(), method.size()},
+                std::string_view{target.data(), target.size()}, ops_)) {
+            if (ops->httpStatus == 405) {
+                response_.set(http::field::allow, "GET");
+            }
+            response_.set(http::field::content_type, ops->contentType);
+            reply(static_cast<http::status>(ops->httpStatus), std::move(ops->body));
+            return;
+        }
 
         if (request.target() != "/transactions") {
             reply(http::status::not_found, R"({"status":"REJECTED","error":"unknown path"})");
@@ -156,7 +176,7 @@ private:
         case NetworkSimulationMode::DropAfterProcessing:
             // Store and commit exactly as normal, then hang up instead of
             // answering: the POS can't tell this from the request being lost.
-            (void)handleTransactionRequest(request.body(), store_);
+            (void)handleTransactionRequest(request.body(), store_, &metrics_);
             spdlog::warn("Simulated drop after processing: COMMITTED, response dropped");
             close();
             break;
@@ -169,7 +189,7 @@ private:
             options_.beforeProcess();
         }
         const auto& request = parser_.get();
-        const auto result = handleTransactionRequest(request.body(), store_);
+        const auto result = handleTransactionRequest(request.body(), store_, &metrics_);
         reply(static_cast<http::status>(result.httpStatus), result.body);
     }
 
@@ -201,6 +221,8 @@ private:
     ProcessedTransactionStore& store_;
     ModeSource& modes_;
     const ServerOptions& options_;
+    ServerMetrics& metrics_;
+    const observability::OpsEndpoints& ops_;
 };
 
 } // namespace
@@ -210,10 +232,28 @@ struct HttpTransactionServer::Impl {
          ServerOptions serverOptions)
         : store{s}
         , options{std::move(serverOptions)}
+        , ownedRegistry{options.metrics != nullptr
+                            ? nullptr
+                            : std::make_unique<observability::MetricsRegistry>()}
+        , registry{options.metrics != nullptr ? *options.metrics : *ownedRegistry}
+        , metrics{registry}
         , ioc{static_cast<int>(options.ioThreads)}
         , acceptor{asio::make_strand(ioc), tcp::endpoint{asio::ip::make_address(address), port}}
         , boundPort{acceptor.local_endpoint().port()}
     {
+        registry.gauge("server_transactions_stored", "Transactions in the server database",
+            [&store = store] { return static_cast<double>(store.count()); });
+        registry.gauge("server_io_threads", "Threads serving requests",
+            [threads = options.ioThreads] { return static_cast<double>(threads); });
+
+        ops.metrics = [this] { return registry.renderPrometheus(); };
+        ops.readiness = [this] {
+            const bool databaseOk = store.ping();
+            return observability::Readiness{databaseOk, {
+                {"database", databaseOk ? "ok" : "unavailable"},
+                {"simulation_mode", std::string{toString(modes.mode.load())}},
+            }};
+        };
     }
 
     // Each accepted socket gets a strand of its own; the acceptor keeps its
@@ -230,7 +270,8 @@ struct HttpTransactionServer::Impl {
                     // lost, but the server must keep accepting.
                     spdlog::warn("Accept failed: {}", ec.message());
                 } else {
-                    std::make_shared<Session>(std::move(socket), store, modes, options)->start();
+                    std::make_shared<Session>(std::move(socket), store, modes, options, metrics, ops)
+                        ->start();
                 }
                 accept();
             });
@@ -252,6 +293,10 @@ struct HttpTransactionServer::Impl {
 
     ProcessedTransactionStore& store;
     ServerOptions options;
+    std::unique_ptr<observability::MetricsRegistry> ownedRegistry;
+    observability::MetricsRegistry& registry;
+    ServerMetrics metrics;
+    observability::OpsEndpoints ops;
     ModeSource modes;
     asio::io_context ioc;
     tcp::acceptor acceptor;
@@ -286,6 +331,11 @@ void HttpTransactionServer::setSimulationMode(NetworkSimulationMode mode) noexce
 NetworkSimulationMode HttpTransactionServer::simulationMode() const noexcept
 {
     return impl_->modes.mode.load();
+}
+
+std::string HttpTransactionServer::renderMetrics() const
+{
+    return impl_->registry.renderPrometheus();
 }
 
 void HttpTransactionServer::run(bool handleSignals)

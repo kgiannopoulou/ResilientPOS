@@ -72,6 +72,10 @@ public:
     [[nodiscard]]
     std::size_t count();
 
+    // True if the database answers a query right now. For readiness checks.
+    [[nodiscard]]
+    bool ping() noexcept;
+
 private:
     class ConnectionPool;
 

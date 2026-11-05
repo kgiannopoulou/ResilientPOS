@@ -98,6 +98,10 @@ add_library(resilientpos_core
     src/util/UuidGenerator.cpp
     src/util/Sha256.cpp
     src/util/Logging.cpp
+    src/observability/Metrics.cpp
+    src/observability/PosMetrics.cpp
+    src/observability/OpsEndpoints.cpp
+    src/observability/OpsHttpServer.cpp
     src/storage/SQLiteTransactionRepository.cpp
     src/network/SendResult.cpp
     src/network/HttpServerClient.cpp
@@ -160,6 +164,7 @@ if(RESILIENTPOS_BUILD_TESTS)
         tests/SyncWorkerTests.cpp
         tests/DeadLetterTests.cpp
         tests/ConcurrencyTests.cpp
+        tests/MetricsTests.cpp
         tests/IntegrationTests.cpp
     )
     target_include_directories(resilientpos_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)

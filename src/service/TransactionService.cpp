@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <exception>
 #include <utility>
 
@@ -14,10 +15,12 @@ using network::SendResultType;
 TransactionService::TransactionService(
     storage::TransactionRepository& repository,
     network::ServerClient& serverClient,
-    TransactionEvents events)
+    TransactionEvents events,
+    observability::PosMetrics* metrics)
     : repository_{repository}
     , serverClient_{serverClient}
     , events_{std::move(events)}
+    , metrics_{metrics}
 {
 }
 
@@ -28,17 +31,26 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
 
     repository_.save(transaction);  // throws -> nothing was sent, sale not taken
     spdlog::info("Transaction created id={} amount={}", shortId, amount.cents());
+    if (metrics_ != nullptr) {
+        metrics_->transactionsCreated.increment();
+    }
     if (events_.persisted) {
         events_.persisted(transaction);
     }
 
     // Only after successful persistence.
+    const auto sendStarted = std::chrono::steady_clock::now();
     try {
         lastSendResult_ = serverClient_.send(transaction);
     } catch (const std::exception& e) {
         // ServerClient should report failures, not throw; if one does anyway,
         // the sale is already on disk, so treat it like the network being down.
         lastSendResult_ = SendResult{SendResultType::NetworkError, e.what()};
+    }
+    if (metrics_ != nullptr) {
+        metrics_->recordSend(lastSendResult_,
+                             std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - sendStarted));
     }
 
     // Accepted and AlreadyProcessed both mean the server holds it.
@@ -56,6 +68,9 @@ core::Transaction TransactionService::createTransaction(core::Money amount)
         transaction.lastFailure = network::toSyncFailure(lastSendResult_);
         repository_.recordFailure(transaction.id, transaction.status, *transaction.lastFailure,
                                   /*countsAgainstLimit=*/false);
+        if (metrics_ != nullptr) {
+            metrics_->transactionsDeadLettered.increment();
+        }
         spdlog::error("Transaction dead-lettered id={} result={} reason=\"{}\"",
                       shortId, network::toString(lastSendResult_.type), lastSendResult_.message);
     } else {

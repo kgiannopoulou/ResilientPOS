@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <string_view>
 #include <utility>
@@ -200,6 +201,18 @@ std::size_t ProcessedTransactionStore::count()
     Statement stmt{connection.get(), "SELECT COUNT(*) FROM processed_transactions"};
     stmt.step();
     return static_cast<std::size_t>(stmt.columnInt64(0));
+}
+
+bool ProcessedTransactionStore::ping() noexcept
+{
+    try {
+        const auto connection = pool_->acquire();
+        Statement stmt{connection.get(), "SELECT 1 FROM processed_transactions LIMIT 1"};
+        (void)stmt.step();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 } // namespace resilientpos::server

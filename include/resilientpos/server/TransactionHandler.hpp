@@ -1,6 +1,7 @@
 #pragma once
 
 #include "resilientpos/server/ProcessedTransactionStore.hpp"
+#include "resilientpos/server/ServerMetrics.hpp"
 
 #include <string>
 #include <string_view>
@@ -31,6 +32,10 @@ struct HandlerResponse {
 //
 // Safe to call concurrently: all shared state is in the store.
 [[nodiscard]]
-HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransactionStore& store);
+HandlerResponse handleTransactionRequest(
+    std::string_view body,
+    ProcessedTransactionStore& store,
+    ServerMetrics* metrics = nullptr  // optional
+);
 
 } // namespace resilientpos::server

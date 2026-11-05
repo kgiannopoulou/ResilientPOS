@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -67,6 +68,7 @@ SyncReport SyncEngine::syncPendingTransactions()
         }
         ++report.attempted;
 
+        const auto sendStarted = std::chrono::steady_clock::now();
         SendResult result{SendResultType::NetworkError, ""};
         try {
             result = serverClient_.send(transaction);
@@ -74,6 +76,13 @@ SyncReport SyncEngine::syncPendingTransactions()
             // ServerClient should report, not throw; if it does, retry later.
             result = SendResult{SendResultType::NetworkError, e.what()};
         }
+        if (options_.metrics != nullptr) {
+            options_.metrics->retryAttempts.increment();
+            options_.metrics->recordSend(
+                result, std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - sendStarted));
+        }
+
         if (result.successful()) {
             report.outcomes.push_back({transaction.id, result.type, result.message, false});
             repository_.updateStatus(transaction.id, TransactionStatus::Synced);
@@ -101,6 +110,9 @@ SyncReport SyncEngine::syncPendingTransactions()
 
         if (giveUp) {
             ++report.deadLettered;
+            if (options_.metrics != nullptr) {
+                options_.metrics->transactionsDeadLettered.increment();
+            }
             spdlog::error("Transaction dead-lettered id={} result={} attempts={} reason=\"{}\"",
                           shortId(transaction.id), network::toString(result.type),
                           transaction.syncAttempts + 1, result.message);

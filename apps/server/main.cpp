@@ -165,6 +165,7 @@ int main(int argc, char* argv[])
               + " processed)\n"
               + "Listening on http://127.0.0.1:" + std::to_string(server.port()) + "/transactions"
               + " (" + std::to_string(ioThreads) + " I/O threads)\n"
+              + "Monitoring: /health /ready /metrics\n"
               + "Press Ctrl+C to stop.\n\n"
               + menu() + describeMode(mode) + '\n');
         server.setSimulationMode(mode);

@@ -5,8 +5,10 @@
 #include <boost/json.hpp>
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cstdint>
 #include <exception>
+#include <utility>
 
 namespace json = boost::json;
 
@@ -14,7 +16,13 @@ namespace resilientpos::server {
 
 namespace {
 
-HandlerResponse reply(unsigned int httpStatus, std::string_view status, std::string_view error = {})
+// A response, plus the status text it carries, which is what gets counted.
+struct Reply {
+    HandlerResponse response;
+    std::string_view status;
+};
+
+Reply reply(unsigned int httpStatus, std::string_view status, std::string_view error = {})
 {
     if (!error.empty()) {
         spdlog::warn("Request {} status={} error=\"{}\"", httpStatus, status, error);
@@ -23,12 +31,26 @@ HandlerResponse reply(unsigned int httpStatus, std::string_view status, std::str
     if (!error.empty()) {
         body["error"] = error;
     }
-    return {httpStatus, json::serialize(body)};
+    return {{httpStatus, json::serialize(body)}, status};
 }
 
-} // namespace
+void count(std::string_view status, ServerMetrics& metrics)
+{
+    metrics.requests.increment();
+    if (status == "ACCEPTED") {
+        metrics.accepted.increment();
+    } else if (status == "ALREADY_PROCESSED") {
+        metrics.duplicates.increment();
+    } else if (status == "IDEMPOTENCY_CONFLICT") {
+        metrics.conflicts.increment();
+    } else if (status == "REJECTED") {
+        metrics.rejected.increment();
+    } else {
+        metrics.errors.increment();
+    }
+}
 
-HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransactionStore& store)
+Reply handle(std::string_view body, ProcessedTransactionStore& store)
 {
     std::error_code parseError;
     const json::value request = json::parse(body, parseError);
@@ -80,6 +102,23 @@ HandlerResponse handleTransactionRequest(std::string_view body, ProcessedTransac
     } catch (const std::exception& e) {
         return reply(500, "ERROR", e.what());
     }
+}
+
+} // namespace
+
+HandlerResponse handleTransactionRequest(
+    std::string_view body,
+    ProcessedTransactionStore& store,
+    ServerMetrics* metrics)
+{
+    const auto started = std::chrono::steady_clock::now();
+    auto result = handle(body, store);
+    if (metrics != nullptr) {
+        count(result.status, *metrics);
+        metrics->requestDuration.observe(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started));
+    }
+    return std::move(result.response);
 }
 
 } // namespace resilientpos::server

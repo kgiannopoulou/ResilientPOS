@@ -4,6 +4,7 @@
 #include "resilientpos/core/Transaction.hpp"
 #include "resilientpos/network/SendResult.hpp"
 #include "resilientpos/network/ServerClient.hpp"
+#include "resilientpos/observability/PosMetrics.hpp"
 #include "resilientpos/storage/TransactionRepository.hpp"
 
 #include <functional>
@@ -48,7 +49,8 @@ public:
     TransactionService(
         storage::TransactionRepository& repository,
         network::ServerClient& serverClient,
-        TransactionEvents events = {}
+        TransactionEvents events = {},
+        observability::PosMetrics* metrics = nullptr  // optional; must outlive the service
     );
 
     // Returns the transaction with its final status (SYNCED, PENDING_SYNC or
@@ -65,6 +67,7 @@ private:
     storage::TransactionRepository& repository_;
     network::ServerClient& serverClient_;
     TransactionEvents events_;
+    observability::PosMetrics* metrics_;
     network::SendResult lastSendResult_{network::SendResultType::NetworkError, "nothing sent yet"};
 };
 

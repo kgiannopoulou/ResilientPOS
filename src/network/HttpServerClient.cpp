@@ -6,8 +6,10 @@
 #include <boost/json.hpp>
 
 #include <exception>
+#include <optional>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -42,10 +44,67 @@ beast::error_code runOperation(asio::io_context& ioc, Start&& start)
     return result;
 }
 
+using Request = http::request<http::string_body>;
+using Response = http::response<http::string_body>;
+
+// One connection, one request, one response. Says which step failed if it
+// did not get that far.
+std::variant<Response, SendResult> exchange(
+    const std::string& host,
+    std::uint16_t port,
+    std::chrono::milliseconds timeout,
+    Request& request)
+{
+    asio::io_context ioc;
+    tcp::resolver resolver{ioc};
+    beast::tcp_stream stream{ioc};
+
+    tcp::resolver::results_type endpoints;
+    auto ec = runOperation(ioc, [&](auto handler) {
+        resolver.async_resolve(host, std::to_string(port),
+            [&endpoints, handler](beast::error_code e, tcp::resolver::results_type r) {
+                endpoints = std::move(r);
+                handler(e);
+            });
+    });
+    if (ec) {
+        return networkError("Cannot resolve " + host, ec);
+    }
+
+    stream.expires_after(timeout);
+    ec = runOperation(ioc, [&](auto handler) { stream.async_connect(endpoints, handler); });
+    if (ec) {
+        return networkError("Cannot connect to " + host + ":" + std::to_string(port), ec);
+    }
+
+    stream.expires_after(timeout);
+    ec = runOperation(ioc, [&](auto handler) { http::async_write(stream, request, handler); });
+    if (ec) {
+        return networkError("Sending request failed", ec);
+    }
+
+    // From here on the server may already have stored the transaction even
+    // if we never see its reply. That is fine: the sale stays PENDING_SYNC,
+    // is resent later and the server answers ALREADY_PROCESSED.
+    beast::flat_buffer buffer;
+    Response response;
+    stream.expires_after(timeout);
+    ec = runOperation(ioc, [&](auto handler) {
+        http::async_read(stream, buffer, response, handler);
+    });
+    if (ec) {
+        return networkError("No reply from server", ec);
+    }
+
+    beast::error_code ignored;
+    (void)stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
+    return response;
+}
+
 // `response` is a const reference to a fully read reply; clang-analyzer
 // follows Beast's internal moves into it and misreports it as moved-from.
 // NOLINTBEGIN(clang-analyzer-cplusplus.Move)
-SendResult interpretResponse(const http::response<http::string_body>& response)
+SendResult interpretResponse(const Response& response)
 {
     const auto statusCode = response.result_int();
     const auto detail = "HTTP " + std::to_string(statusCode) + ": " + response.body();
@@ -103,29 +162,7 @@ HttpServerClient::HttpServerClient(std::string host, std::uint16_t port,
 SendResult HttpServerClient::send(const core::Transaction& transaction)
 {
     try {
-        asio::io_context ioc;
-        tcp::resolver resolver{ioc};
-        beast::tcp_stream stream{ioc};
-
-        tcp::resolver::results_type endpoints;
-        auto ec = runOperation(ioc, [&](auto handler) {
-            resolver.async_resolve(host_, std::to_string(port_),
-                [&endpoints, handler](beast::error_code e, tcp::resolver::results_type r) {
-                    endpoints = std::move(r);
-                    handler(e);
-                });
-        });
-        if (ec) {
-            return networkError("Cannot resolve " + host_, ec);
-        }
-
-        stream.expires_after(timeout_);
-        ec = runOperation(ioc, [&](auto handler) { stream.async_connect(endpoints, handler); });
-        if (ec) {
-            return networkError("Cannot connect to " + host_ + ":" + std::to_string(port_), ec);
-        }
-
-        http::request<http::string_body> request{http::verb::post, "/transactions", 11};
+        Request request{http::verb::post, "/transactions", 11};
         request.set(http::field::host, host_);
         request.set(http::field::content_type, "application/json");
         request.set(http::field::user_agent, "ResilientPOS");
@@ -135,32 +172,40 @@ SendResult HttpServerClient::send(const core::Transaction& transaction)
         });
         request.prepare_payload();
 
-        stream.expires_after(timeout_);
-        ec = runOperation(ioc, [&](auto handler) { http::async_write(stream, request, handler); });
-        if (ec) {
-            return networkError("Sending request failed", ec);
+        auto outcome = exchange(host_, port_, timeout_, request);
+        if (auto* failure = std::get_if<SendResult>(&outcome)) {
+            return std::move(*failure);
         }
-
-        // From here on the server may already have stored the transaction even
-        // if we never see its reply. That is fine: the sale stays PENDING_SYNC,
-        // is resent later and the server answers ALREADY_PROCESSED.
-        beast::flat_buffer buffer;
-        http::response<http::string_body> response;
-        stream.expires_after(timeout_);
-        ec = runOperation(ioc, [&](auto handler) {
-            http::async_read(stream, buffer, response, handler);
-        });
-        if (ec) {
-            return networkError("No reply from server", ec);
-        }
-
-        beast::error_code ignored;
-        (void)stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
-
-        return interpretResponse(response);
+        return interpretResponse(std::get<Response>(outcome));
     } catch (const std::exception& e) {
         // Contract: expected failures are reported, not thrown.
         return {SendResultType::NetworkError, e.what()};
+    }
+}
+
+std::optional<HttpGetResponse> httpGet(
+    const std::string& host,
+    std::uint16_t port,
+    const std::string& target,
+    std::chrono::milliseconds timeout)
+{
+    try {
+        Request request{http::verb::get, target, 11};
+        request.set(http::field::host, host);
+        request.set(http::field::user_agent, "ResilientPOS");
+
+        auto outcome = exchange(host, port, timeout, request);
+        const auto* response = std::get_if<Response>(&outcome);
+        if (response == nullptr) {
+            return std::nullopt;
+        }
+        return HttpGetResponse{
+            response->result_int(),
+            std::string{(*response)[http::field::content_type]},
+            response->body(),
+        };
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
 }
 

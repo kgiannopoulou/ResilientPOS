@@ -9,6 +9,9 @@
 #include "resilientpos/core/Transaction.hpp"
 #include "resilientpos/network/HttpServerClient.hpp"
 #include "resilientpos/network/MonitoredServerClient.hpp"
+#include "resilientpos/observability/Metrics.hpp"
+#include "resilientpos/observability/OpsHttpServer.hpp"
+#include "resilientpos/observability/PosMetrics.hpp"
 #include "resilientpos/service/TransactionService.hpp"
 #include "resilientpos/storage/SQLiteTransactionRepository.hpp"
 #include "resilientpos/storage/TransactionRepository.hpp"
@@ -32,6 +35,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 using resilientpos::core::Money;
 using resilientpos::core::Transaction;
@@ -41,11 +46,18 @@ using resilientpos::network::HttpServerClient;
 using resilientpos::network::MonitoredServerClient;
 using resilientpos::network::SendResult;
 using resilientpos::network::SendResultType;
+using resilientpos::observability::MetricsRegistry;
+using resilientpos::observability::OpsEndpoints;
+using resilientpos::observability::OpsHttpServer;
+using resilientpos::observability::PosMetrics;
+using resilientpos::observability::Readiness;
 using resilientpos::service::TransactionEvents;
 using resilientpos::service::TransactionService;
 using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::TransactionRepository;
+using resilientpos::sync::RetryPolicy;
 using resilientpos::sync::SyncEngine;
+using resilientpos::sync::SyncOptions;
 
 namespace {
 
@@ -428,14 +440,49 @@ void setUpLogging(const std::filesystem::path& databasePath)
 
 } // namespace
 
-// Usage: resilient-pos [database] [server-host] [server-port]
+// Being offline is normal for a till, so it does not make it unready: all it
+// needs to take a sale is its own database.
+OpsEndpoints tillEndpoints(MetricsRegistry& registry, TransactionRepository& repository,
+                           MonitoredServerClient& serverClient)
+{
+    return OpsEndpoints{
+        .metrics = [&registry] { return registry.renderPrometheus(); },
+        .readiness = [&repository, &serverClient] {
+            const auto pending = repository.findPending().size();
+            return Readiness{true, {
+                {"database", "ok"},
+                {"pending", std::to_string(pending)},
+                {"network", std::string{resilientpos::network::toString(serverClient.snapshot().state)}},
+            }};
+        },
+    };
+}
+
+// Usage: resilient-pos [--metrics-port N] [database] [server-host] [server-port]
 int main(int argc, char* argv[])
 {
     try {
+        std::optional<std::uint16_t> metricsPort;
+        std::vector<std::string_view> positional;
+        for (int i = 1; i < argc; ++i) {
+            const std::string_view arg{argv[i]};
+            if (arg == "--metrics-port") {
+                if (i + 1 >= argc) {
+                    throw std::invalid_argument{"--metrics-port needs a value"};
+                }
+                metricsPort = parsePort(argv[++i]);
+            } else {
+                positional.push_back(arg);
+            }
+        }
+
         const std::filesystem::path databasePath =
-            argc > 1 ? std::filesystem::path{argv[1]} : std::filesystem::path{kDefaultDatabase};
-        const std::string serverHost = argc > 2 ? argv[2] : std::string{kDefaultServerHost};
-        const std::uint16_t serverPort = argc > 3 ? parsePort(argv[3]) : kDefaultServerPort;
+            !positional.empty() ? std::filesystem::path{positional[0]}
+                                : std::filesystem::path{kDefaultDatabase};
+        const std::string serverHost =
+            positional.size() > 1 ? std::string{positional[1]} : std::string{kDefaultServerHost};
+        const std::uint16_t serverPort =
+            positional.size() > 2 ? parsePort(positional[2]) : kDefaultServerPort;
 
         if (databasePath.has_parent_path()) {
             std::filesystem::create_directories(databasePath.parent_path());
@@ -448,15 +495,27 @@ int main(int argc, char* argv[])
         SQLiteTransactionRepository repository{databasePath.string()};
         HttpServerClient httpClient{serverHost, serverPort};
         MonitoredServerClient serverClient{httpClient};
-        SyncEngine syncEngine{repository, serverClient};  // recovers interrupted sends
-        TransactionService service{repository, serverClient, cliEvents(syncEngine)};
+        MetricsRegistry registry;
+        PosMetrics metrics{registry, repository};
+        SyncEngine syncEngine{repository, serverClient, RetryPolicy{},
+                              SyncOptions{.metrics = &metrics}};  // recovers interrupted sends
+        TransactionService service{repository, serverClient, cliEvents(syncEngine), &metrics};
         syncEngine.start();
+
+        std::optional<OpsHttpServer> opsServer;
+        if (metricsPort) {
+            opsServer.emplace(tillEndpoints(registry, repository, serverClient),
+                              "127.0.0.1", *metricsPort);
+        }
 
         Till till{repository, serverClient, service, syncEngine,
                   "http://" + serverHost + ":" + std::to_string(serverPort)};
 
         std::cout << "Database: " << databasePath.string() << '\n'
                   << "Server:   " << till.serverUrl << '\n';
+        if (opsServer) {
+            std::cout << "Metrics:  http://127.0.0.1:" << opsServer->port() << "/metrics\n";
+        }
 
         while (true) {
             showMainScreen(till);
