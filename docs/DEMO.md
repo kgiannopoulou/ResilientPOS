@@ -1,4 +1,8 @@
-# ResilientPOS — 3–5 minute demo
+# ResilientPOS — demo
+
+Short on time? `./build/resilient-sim` runs a whole shop through an outage in one
+command and ends with the verification; section 8 below walks through it. The full
+walkthrough takes 5–7 minutes.
 
 Three terminals side by side: **server**, **till**, **till log**. Start from
 clean databases so the counts below match:
@@ -10,7 +14,7 @@ rm -f data/*.db* data/*.log
 | Terminal | Command |
 |---|---|
 | A — server | `./build/resilient-server` |
-| B — till   | `./build/resilient-pos` |
+| B — till   | `./build/resilient-pos --metrics-port 9100` |
 | C — log    | `tail -f data/pos.log` |
 
 ## 1. Online sale (30 s)
@@ -38,15 +42,19 @@ Transaction safely stored locally.
 POS can continue operating.
 ```
 
-**B:** `4` (Network status) — `OFFLINE`, worker `Backing off: retry #3 in 4s`.
-**C:** `Sync retry scheduled attempt=1 delay_ms=1000`, then 2000, 4000 ...
+**B:** `4` (Network status) — `OFFLINE`, worker `Backing off: retry #3 in 2s`.
+**C:** `Sync retry scheduled attempt=1 delay_ms=613 ceiling_ms=1000`, then ceilings
+of 2000, 4000 ...
 
 > "The worker isn't polling. It's on a timed condition-variable wait for an
-> exponential backoff: 1, 2, 4, 8, 16, then 30 seconds."
+> exponential backoff with full jitter: the ceiling goes 1, 2, 4, 8, 16, then
+> 30 seconds, and each wait is random under it. Without that, a hundred tills
+> that lost the server together would all retry together, right when it comes
+> back. The randomness is injected, so the tests stay deterministic."
 
 ## 3. Crash recovery (30 s)
 
-**B:** close the terminal window (or `5`), start `./build/resilient-pos` again.
+**B:** close the terminal window (or `6`), start `./build/resilient-pos --metrics-port 9100` again.
 Main screen: `Pending transactions: 3`.
 
 > "The queue *is* the database. Restarting loses nothing."
@@ -92,9 +100,70 @@ Main screen: `Pending transactions: 3`.
 > point of the project, and it's pinned by the integration test
 > `LostResponseDoesNotCauseDuplicateTransaction`."
 
-## 6. Close (30 s)
+## 6. Same ID, different payload (45 s)
 
-**B:** `5` → `Stopping sync worker... done.`
+**A:** press `1` (normal). Then, from a fourth terminal:
+
+```bash
+curl -X POST localhost:8080/transactions -d '{"transaction_id":"abc-123","amount_cents":1000}'
+# {"status":"ACCEPTED"}
+curl -X POST localhost:8080/transactions -d '{"transaction_id":"abc-123","amount_cents":1000}'
+# {"status":"ALREADY_PROCESSED"}
+curl -X POST localhost:8080/transactions -d '{"transaction_id":"abc-123","amount_cents":10000}'
+# 409 {"status":"IDEMPOTENCY_CONFLICT","error":"transaction_id was already used with a different payload"}
+```
+
+> "An ID alone isn't enough. If the second request were treated as a retry, the
+> till would think €100 was stored while the server holds €10, and nobody would
+> ever find out. So the server stores a hash of the payload: same ID and same hash
+> is a retry, same ID and a different hash is refused."
+
+## 7. A sale that can never succeed (60 s)
+
+**A:** press `8` — *Poison (422 permanent refusal)*. **B:** ring up `Bagel 2.50 1`:
+
+```
+[SERVER] Rejected: HTTP 422: ...
+Status: DEAD_LETTER
+The server refused this sale, so it will not be retried.
+```
+
+**B:** `5` (Dead letter queue) shows the sale with its reason. **A:** press `1`.
+**B:** `5` again, then `1` to retry it. It goes back through the queue and syncs.
+
+> "Failures are classified by what they say about the sale. Being unreachable says
+> nothing, so that retries forever and never uses up the retry budget: a till can
+> be offline for days. A 500 might be about this sale, so it gets ten tries. A 422
+> is a verdict, so retrying is pointless. The sale is never deleted, it waits on
+> disk for a person."
+
+**Then look at the numbers:**
+
+```bash
+curl localhost:9100/metrics | grep -E '^(transactions|sync_failures|retry)'
+curl localhost:8080/metrics | grep -E '^(server_|idempotency)'
+curl localhost:8080/ready
+```
+
+> "A till that's offline still answers `/ready`, because all it needs to take a
+> sale is its own database."
+
+## 8. A whole shop (60 s)
+
+**A:** `Ctrl+C`. Then `./build/resilient-sim --terminals 5`.
+
+> "This is the same code with no fakes: five terminals, each with its own SQLite
+> file and sync worker, talking TCP to a multi-threaded server. One terminal loses
+> its link and the others don't notice. Then the server really stops, everyone keeps
+> selling, and each backs off on its own random schedule. The server comes back but
+> drops replies after committing, so terminals resend sales it already has. Then
+> someone replays a known ID with a new amount. At the end it compares every sale
+> against the server, by ID and amount, and exits non-zero if anything is off, which
+> is why CI runs it on every push."
+
+## 9. Close (30 s)
+
+**B:** `6` → `Stopping sync worker... done.`
 
 > "Shutdown is RAII: `request_stop()` wakes the worker's wait, the in-flight send
 > finishes, the `jthread` joins, then SQLite closes — destruction order in
@@ -107,7 +176,18 @@ Main screen: `Pending transactions: 3`.
   time as the UI thread. A `CREATED` row left by a crash is requeued at startup.
 - **Why stop the pass at the first network error?** If the server is unreachable
   for one sale it's unreachable for all; each failed attempt can take seconds.
-- **What about many tills?** UUIDs are generated offline, so no coordination;
-  the server's idempotency is enforced by the database, not by its single thread.
-  Next steps would be jitter on the backoff and a dead-letter state for sales the
-  server permanently rejects.
+- **What about many tills?** UUIDs are generated offline, so no coordination, and
+  jittered backoff keeps them from retrying in step. `resilient-sim` runs exactly
+  this.
+- **Why not a mutex around the insert on the server?** It would pass every test on
+  one server and break the day a second one shared the database. The primary key
+  and a single atomic `INSERT ... ON CONFLICT` hold across threads and processes. A
+  test races independent store instances to prove the process isn't what's helping.
+- **Then what do the extra I/O threads buy, if SQLite has one writer?** Overlap:
+  a commit blocks one thread on an fsync while the others read, parse and answer.
+  A strand per connection keeps each session lock-free.
+- **Why doesn't a max-attempts limit fire during an outage?** Only failures the
+  server attributes to a request count. Otherwise the sale at the head of the queue
+  would be dead-lettered just for the till being offline.
+- **Why hash the payload instead of comparing the amount?** Adding line items then
+  only changes the canonical form. The check doesn't change.
