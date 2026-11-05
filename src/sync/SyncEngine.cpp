@@ -172,11 +172,12 @@ void SyncEngine::run(const std::stop_token& stopToken)
 
         std::unique_lock lock{stateMutex_};
         if (failed) {
+            const auto ceiling = retryPolicy_.ceiling(status_.consecutiveFailures);
             const auto delay = retryPolicy_.nextDelay(status_.consecutiveFailures);
             ++status_.consecutiveFailures;
             status_.nextRetryAt = std::chrono::steady_clock::now() + delay;
-            spdlog::warn("Sync retry scheduled attempt={} delay_ms={}",
-                         status_.consecutiveFailures, delay.count());
+            spdlog::warn("Sync retry scheduled attempt={} delay_ms={} ceiling_ms={}",
+                         status_.consecutiveFailures, delay.count(), ceiling.count());
             // Returns early only if stop is requested or the server is known
             // to be back; new pending sales just wait for the retry.
             wakeUp_.wait_for(lock, stopToken, delay, [this] { return reachableSignalled_; });

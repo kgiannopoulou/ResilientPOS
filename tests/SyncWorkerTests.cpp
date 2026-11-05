@@ -28,6 +28,7 @@ using resilientpos::network::ServerClient;
 using resilientpos::service::TransactionService;
 using resilientpos::storage::SQLiteTransactionRepository;
 using resilientpos::storage::TransactionRepository;
+using resilientpos::sync::noJitter;
 using resilientpos::sync::RetryPolicy;
 using resilientpos::sync::SyncEngine;
 using resilientpos::test::eventually;
@@ -50,7 +51,13 @@ bool isSynced(TransactionRepository& repository, const std::string& id)
 }
 
 // Short delays so backoff tests run in milliseconds, not seconds.
-const RetryPolicy kFastRetry{20ms, 80ms};
+const RetryPolicy kFastRetry{20ms, 80ms, noJitter()};
+
+// A wait long enough to outlast the test, exactly: real jitter could pick ~0.
+RetryPolicy longBackoff(std::chrono::milliseconds delay)
+{
+    return RetryPolicy{delay, delay, noJitter()};
+}
 
 } // namespace
 
@@ -110,7 +117,7 @@ TEST_CASE("Worker retries a failing server with exponential backoff", "[worker][
         sendTimes.push_back(std::chrono::steady_clock::now());
     };
 
-    const RetryPolicy policy{30ms, 120ms};
+    const RetryPolicy policy{30ms, 120ms, noJitter()};
     SyncEngine engine{repository, server, policy};
     engine.start();
     REQUIRE(eventually([&] { return server.sendCount() >= 4; }));
@@ -126,6 +133,26 @@ TEST_CASE("Worker retries a failing server with exponential backoff", "[worker][
         INFO("gap before send " << i);
         REQUIRE(sendTimes[i] - sendTimes[i - 1] >= policy.nextDelay(i - 1));
     }
+}
+
+TEST_CASE("Worker waits the delay the injected jitter picked", "[worker][retry][jitter]")
+{
+    FakeTransactionRepository repository;
+    savePending(repository, Money{100});
+    FakeServerClient server;
+    server.resultToReturn = {SendResultType::NetworkError, "down"};
+
+    std::atomic<int> picks{0};
+    const RetryPolicy policy{10s, 10s, [&](std::chrono::milliseconds) {
+        ++picks;
+        return 1ms;  // far below the 10 s ceiling
+    }};
+    SyncEngine engine{repository, server, policy};
+    engine.start();
+
+    // Only the jitter's pick lets this retry inside the test's timeout.
+    REQUIRE(eventually([&] { return server.sendCount() >= 5; }, 5s));
+    REQUIRE(picks >= 4);
 }
 
 TEST_CASE("Worker recovers once the server comes back", "[worker][offline]")
@@ -150,7 +177,7 @@ TEST_CASE("New sales during a backoff do not trigger a retry storm", "[worker][r
     savePending(repository, Money{100});
     FakeServerClient server;
     server.resultToReturn = {SendResultType::NetworkError, "down"};
-    SyncEngine engine{repository, server, RetryPolicy{10s, 10s}};
+    SyncEngine engine{repository, server, longBackoff(10s)};
     engine.start();
     REQUIRE(eventually([&] { return engine.workerStatus().nextRetryAt.has_value(); }));
 
@@ -169,7 +196,7 @@ TEST_CASE("Server reachable ends a backoff early", "[worker][retry]")
     const auto tx = savePending(repository, Money{100});
     FakeServerClient server;
     server.resultToReturn = {SendResultType::NetworkError, "down"};
-    SyncEngine engine{repository, server, RetryPolicy{60s, 60s}};
+    SyncEngine engine{repository, server, longBackoff(60s)};
     engine.start();
     REQUIRE(eventually([&] { return engine.workerStatus().nextRetryAt.has_value(); }));
 
@@ -185,7 +212,7 @@ TEST_CASE("Stop wakes a backing-off worker and joins it promptly", "[worker][shu
     savePending(repository, Money{100});
     FakeServerClient server;
     server.resultToReturn = {SendResultType::NetworkError, "down"};
-    SyncEngine engine{repository, server, RetryPolicy{60s, 60s}};
+    SyncEngine engine{repository, server, longBackoff(60s)};
     engine.start();
     REQUIRE(eventually([&] { return engine.workerStatus().nextRetryAt.has_value(); }));
 

@@ -81,8 +81,8 @@ struct WorkerStatus {
 //
 // The worker never polls. With an empty queue it sleeps on a condition
 // variable until notifyPendingTransaction() says there is work; after a
-// failure it waits out an exponential backoff instead of hammering a server
-// that is down. Passes are serialized, so a forced sync and the worker never
+// failure it waits out a jittered exponential backoff instead of hammering a
+// server that is down. Passes are serialized, so a forced sync and the worker never
 // send the same sale at the same time.
 //
 // Construction performs crash recovery (repository.recoverInterrupted()), so
