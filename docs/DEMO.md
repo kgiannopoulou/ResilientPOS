@@ -169,25 +169,4 @@ curl localhost:8080/ready
 > finishes, the `jthread` joins, then SQLite closes — destruction order in
 > `main()` is the shutdown order. CI runs the whole suite under ThreadSanitizer."
 
-## Likely questions
 
-- **Why `CREATED` while sending, not `PENDING_SYNC`?** So the background worker,
-  which only claims `PENDING_SYNC` rows, can never send the same sale at the same
-  time as the UI thread. A `CREATED` row left by a crash is requeued at startup.
-- **Why stop the pass at the first network error?** If the server is unreachable
-  for one sale it's unreachable for all; each failed attempt can take seconds.
-- **What about many tills?** UUIDs are generated offline, so no coordination, and
-  jittered backoff keeps them from retrying in step. `resilient-sim` runs exactly
-  this.
-- **Why not a mutex around the insert on the server?** It would pass every test on
-  one server and break the day a second one shared the database. The primary key
-  and a single atomic `INSERT ... ON CONFLICT` hold across threads and processes. A
-  test races independent store instances to prove the process isn't what's helping.
-- **Then what do the extra I/O threads buy, if SQLite has one writer?** Overlap:
-  a commit blocks one thread on an fsync while the others read, parse and answer.
-  A strand per connection keeps each session lock-free.
-- **Why doesn't a max-attempts limit fire during an outage?** Only failures the
-  server attributes to a request count. Otherwise the sale at the head of the queue
-  would be dead-lettered just for the till being offline.
-- **Why hash the payload instead of comparing the amount?** Adding line items then
-  only changes the canonical form. The check doesn't change.
